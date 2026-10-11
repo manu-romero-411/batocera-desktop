@@ -10,7 +10,10 @@ usage() {
 cat <<USG
 Uso: batocera-desktop <comando>
 
-  start            Arranca Batocera en una ventana de tu escritorio Wayland
+  start [--mode auto|nested|drm]
+                   Arranca Batocera. auto: desde un escritorio Wayland -> ventana (labwc
+                   anidado); desde una consola /dev/ttyN sin Wayland -> pantalla completa
+                   directa (DRM/KMS) en esa VT, y se puede cambiar de VT
   stop             Cierra la sesión (limpia todo)
   restart          stop + start
   status           ¿Está en marcha?
@@ -33,6 +36,12 @@ xkb() {  # layout del teclado del host
     printf '%s\n%s\n' "$l" "$v"
 }
 
+cur_tty() {  # /dev/ttyN de la consola actual (BD_TTY solo para pruebas; root lo revalida)
+    local t=${BD_TTY:-}
+    [[ -n $t ]] || t=$(tty 2>/dev/null) || true
+    [[ $t =~ ^/dev/tty[1-9][0-9]*$ ]] && printf '%s\n' "$t"
+}
+
 find_wayland() {
     local d
     if [[ -n ${WAYLAND_DISPLAY:-} ]]; then basename "$WAYLAND_DISPLAY"; return; fi
@@ -46,10 +55,29 @@ case $cmd in
     start)
         [[ $EUID -ne 0 ]] || { echo "Ejecútalo como tu usuario, no como root." >&2; exit 1; }
         XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+        mode=${BD_MODE:-auto}
+        while (($#)); do
+            case $1 in
+                --mode) mode=${2:-}; shift 2 ;;
+                *) usage; exit 1 ;;
+            esac
+        done
+        case $mode in auto|nested|drm) ;; *) echo "--mode: auto|nested|drm" >&2; exit 1 ;; esac
+        tty=$(cur_tty || true)
+        if [[ $mode == auto ]]; then
+            # una sesión Wayland en curso manda; sin ella, una VT de texto -> DRM directo
+            if [[ -n ${WAYLAND_DISPLAY:-} ]]; then mode=nested
+            elif [[ -n $tty ]]; then mode=drm
+            else mode=nested; fi
+        fi
+        if [[ $mode == drm ]]; then
+            [[ -n $tty ]] || { echo "El modo drm se lanza desde una consola /dev/ttyN (Ctrl+Alt+F3, login)." >&2; exit 1; }
+            exec sudo -- "$SESSION" launch --mode drm --tty "$tty" --xdg "$XDG_RUNTIME_DIR"
+        fi
         wl=$(find_wayland)
-        [[ -n $wl ]] || { echo "No encuentro una sesión Wayland (¿estás en X11?)." >&2; exit 1; }
+        [[ -n $wl ]] || { echo "No encuentro una sesión Wayland (¿estás en X11?). Desde una consola usa --mode drm." >&2; exit 1; }
         { read -r kl; read -r kv; } < <(xkb)
-        exec sudo -- "$SESSION" launch --wayland "$wl" --xdg "$XDG_RUNTIME_DIR" \
+        exec sudo -- "$SESSION" launch --mode nested --wayland "$wl" --xdg "$XDG_RUNTIME_DIR" \
             --xkb-layout "$kl" --xkb-variant "$kv" ;;
     stop)    exec sudo -- "$SESSION" stop ;;
     restart) sudo -- "$SESSION" stop; exec "$0" start ;;

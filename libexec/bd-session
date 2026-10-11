@@ -24,10 +24,12 @@ need_root() { [[ $EUID -eq 0 ]] || bd_die "hay que ejecutarlo como root (sudo)";
 # ====================================================== launch / stop (sudo)
 cmd_launch() {
     need_root
-    local uid=${SUDO_UID:-} wl="" xdg="" xl="" xv=""
+    local uid=${SUDO_UID:-} wl="" xdg="" xl="" xv="" mode=nested tty=""
     [[ -n $uid && $uid != 0 ]] || bd_die "ejecútalo como tu usuario de escritorio (con sudo), no como root"
     while (($#)); do
         case $1 in
+            --mode)        mode=${2:-}; shift 2 ;;
+            --tty)         tty=${2:-}; shift 2 ;;
             --wayland)     wl=${2:-}; shift 2 ;;
             --xdg)         xdg=${2:-}; shift 2 ;;
             --xkb-layout)  xl=${2:-}; shift 2 ;;
@@ -35,14 +37,25 @@ cmd_launch() {
             *) bd_die "argumento desconocido: $1" ;;
         esac
     done
-    [[ $wl =~ ^wayland-[0-9]+$ ]] || bd_die "nombre de display Wayland inválido: '$wl'"
     [[ $xdg == "/run/user/$uid" ]] || bd_die "XDG_RUNTIME_DIR inesperado: '$xdg'"
-    [[ -S $xdg/$wl ]] || bd_die "no existe el socket Wayland $xdg/$wl (¿sesión Wayland?)"
+    case $mode in
+        nested)
+            [[ $wl =~ ^wayland-[0-9]+$ ]] || bd_die "nombre de display Wayland inválido: '$wl'"
+            [[ -S $xdg/$wl ]] || bd_die "no existe el socket Wayland $xdg/$wl (¿sesión Wayland?)" ;;
+        drm)
+            # sudo sin contraseña: la VT debe ser una consola real, del usuario y la activa
+            [[ $tty =~ ^/dev/tty[1-9][0-9]*$ && -c $tty ]] || bd_die "tty inválido: '$tty'"
+            [[ $(stat -c %u "$tty") == "$uid" ]] || bd_die "$tty no pertenece a tu usuario"
+            [[ $(cat /sys/class/tty/tty0/active 2>/dev/null) == "${tty##*/}" ]] \
+                || bd_die "${tty##*/} no es la VT activa: lánzalo desde la consola donde quieres Batocera"
+            wl="" ;;
+        *) bd_die "modo desconocido: '$mode'" ;;
+    esac
     [[ $xl =~ ^[A-Za-z0-9_,-]*$ && $xv =~ ^[A-Za-z0-9_,-]*$ ]] || bd_die "layout inválido"
     if systemctl is-active --quiet "$BD_UNIT"; then bd_die "ya hay una sesión Batocera en marcha"; fi
     exec systemd-run --quiet --unit="$BD_UNIT" --description="Batocera en el escritorio" \
         --collect --property=KillMode=control-group --property=TimeoutStopSec=60 \
-        --setenv=BD_UID="$uid" --setenv=BD_WAYLAND="$wl" --setenv=BD_XDG="$xdg" \
+        --setenv=BD_UID="$uid" --setenv=BD_MODE="$mode" --setenv=BD_WAYLAND="$wl" --setenv=BD_XDG="$xdg" \
         --setenv=BD_XKB_LAYOUT_HOST="$xl" --setenv=BD_XKB_VARIANT_HOST="$xv" \
         -- "$BD_PREFIX/libexec/bd-session" run
 }
@@ -160,15 +173,18 @@ bd_mount_runtime() {
 
 bd_inject_files() {
     local n d l
-    bd_put "$BD_PREFIX/share/chroot/usr/bin/labwc-launch" /usr/bin/labwc-launch 0755 || return 1
-    # batocera-resolution: el original no sabe medir la salida del labwc anidado ("unknown").
-    # Se conserva como .real (salvo que ya sea nuestro shim, p.ej. tras batocera-save-overlay)
-    l=$(bd_rleaf "$BD_ROOT" /usr/bin/batocera-resolution)
-    if [[ -e $l || -L $l ]] && ! grep -qs bd-shim-resolution "$l"; then
-        rm -f -- "$l.real"; cp -a -- "$l" "$l.real" || return 1
+    if [[ ${BD_MODE:-nested} == nested ]]; then
+        bd_put "$BD_PREFIX/share/chroot/usr/bin/labwc-launch" /usr/bin/labwc-launch 0755 || return 1
+        # batocera-resolution: el original no sabe medir la salida del labwc anidado ("unknown").
+        # Se conserva como .real (salvo que ya sea nuestro shim, p.ej. tras batocera-save-overlay)
+        l=$(bd_rleaf "$BD_ROOT" /usr/bin/batocera-resolution)
+        if [[ -e $l || -L $l ]] && ! grep -qs bd-shim-resolution "$l"; then
+            rm -f -- "$l.real"; cp -a -- "$l" "$l.real" || return 1
+        fi
+        bd_put "$BD_PREFIX/share/chroot/usr/bin/batocera-resolution" /usr/bin/batocera-resolution 0755 || return 1
+        echo "$BD_RESOLUTION" >"$(bd_rpath "$BD_ROOT" /run)/bd-resolution"
     fi
-    bd_put "$BD_PREFIX/share/chroot/usr/bin/batocera-resolution" /usr/bin/batocera-resolution 0755 || return 1
-    echo "$BD_RESOLUTION" >"$(bd_rpath "$BD_ROOT" /run)/bd-resolution"
+    # modo drm: se usan tal cual el labwc-launch y el batocera-resolution (DRM) de Batocera
     # shims de apagado: ES llama a shutdown/poweroff/reboot -> volver al escritorio / reiniciar sesión
     for d in /sbin /usr/sbin /bin /usr/bin; do
         for n in shutdown poweroff reboot halt; do
@@ -206,6 +222,7 @@ bd_build_env() {
         HOME=/userdata/system
         TERM="${TERM:-linux}"
         BD_SESSION=1
+        BD_MODE="${BD_MODE:-nested}"
         BD_HOST_XDG=/run/host-xdg
         BD_HOST_WAYLAND="${BD_WAYLAND:-}"
         BD_WLR_RENDERER="$BD_WLR_RENDERER"
@@ -217,6 +234,10 @@ bd_build_env() {
     [[ -n $BD_RENDER_NODE ]] && BD_ENV+=("BD_RENDER_NODE=$BD_RENDER_NODE")
     if [[ $BD_AUDIO == host && -n ${BD_XDG:-} ]]; then
         BD_ENV+=(PULSE_SERVER=unix:/run/host-xdg/pulse/native PIPEWIRE_RUNTIME_DIR=/run/host-xdg)
+    fi
+    if [[ ${BD_MODE:-nested} == drm ]]; then
+        [[ -n ${BD_DRM_DEVICES:-} ]] && BD_ENV+=(WLR_DRM_DEVICES="$BD_DRM_DEVICES")
+        [[ $BD_GPU_MODE == nvidia ]] && BD_ENV+=(WLR_NO_HARDWARE_CURSORS=1)
     fi
     if [[ $BD_GPU_MODE == nvidia ]]; then
         BD_ENV+=(

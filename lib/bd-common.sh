@@ -42,6 +42,7 @@ bd_load_config() {
     : "${BD_ON_SHUTDOWN:=exit}"             # exit | host  (qué hace "Apagar" en ES)
     : "${BD_PIDNS:=1}"
     : "${BD_WLR_RENDERER:=gles2}"
+    : "${BD_DRM_DEVICES:=}"                    # modo drm: tarjetas para wlroots, p.ej. /dev/dri/card1 (vacío = Batocera decide)
     : "${BD_RESOLUTION:=1920x1080}"          # tamaño por defecto de la ventana de Batocera (anidado)
     : "${BD_LABWC_DEBUG:=1}"
     : "${BD_XKB_LAYOUT:=}"

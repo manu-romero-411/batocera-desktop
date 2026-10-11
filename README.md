@@ -17,6 +17,10 @@ batocera-desktop start                  # también hay lanzador "Batocera" en el
 ```
 Configuración en `/etc/batocera-desktop.conf` (rutas, discos extra `BD_EXTRA_BINDS="/pcgrande:/pcgrande"`, audio, BT…). Los valores por defecto (`/boot/batocera`, `/batocera`) coinciden con tus scripts viejos, así que tu instalación actual se reutiliza.
 
+## Modos
+* **nested** (por defecto dentro de un escritorio Wayland): Batocera es una ventana de tu compositor; tamaño por defecto `BD_RESOLUTION` (1920x1080).
+* **drm** (por defecto si lanzas `batocera-desktop start` desde una consola `/dev/ttyN` sin Wayland): labwc de Batocera maneja la pantalla directamente (DRM/KMS) en esa VT. Cambias de VT con Ctrl+Alt+Fn y vuelves con la misma; `batocera-desktop stop` (desde otra VT) o *Apagar* en ES lo cierran. Fuerza uno con `--mode`.
+
 ## Uso
 | Comando | |
 |---|---|
