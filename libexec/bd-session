@@ -1,0 +1,453 @@
+#!/usr/bin/env bash
+# bd-session - parte privilegiada de batocera-desktop (corre como root)
+#
+#   launch  (vía sudo, sin contraseña)  crea la unidad systemd transitoria
+#   stop    (vía sudo, sin contraseña)  la para
+#   run     dentro de la unidad: bucle de sesión (reinicio tras "reboot")
+#   inner   PID 1 del namespace: monta capas, arranca servicios, espera, limpia
+#   shell|enter [-- cmd]   entorno Batocera sin arrancar servicios (mantenimiento)
+#   update | install | doctor | apply-pending
+set -u
+BD_PREFIX=${BD_PREFIX:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}
+# shellcheck source=../lib/bd-common.sh
+. "$BD_PREFIX/lib/bd-common.sh"
+bd_load_config
+
+SVC_STARTED=()
+BD_STOP=0
+BD_ACTION=exit
+BD_RC=0
+BD_ENV=()
+
+need_root() { [[ $EUID -eq 0 ]] || bd_die "hay que ejecutarlo como root (sudo)"; }
+
+# ====================================================== launch / stop (sudo)
+cmd_launch() {
+    need_root
+    local uid=${SUDO_UID:-} wl="" xdg="" xl="" xv=""
+    [[ -n $uid && $uid != 0 ]] || bd_die "ejecútalo como tu usuario de escritorio (con sudo), no como root"
+    while (($#)); do
+        case $1 in
+            --wayland)     wl=${2:-}; shift 2 ;;
+            --xdg)         xdg=${2:-}; shift 2 ;;
+            --xkb-layout)  xl=${2:-}; shift 2 ;;
+            --xkb-variant) xv=${2:-}; shift 2 ;;
+            *) bd_die "argumento desconocido: $1" ;;
+        esac
+    done
+    [[ $wl =~ ^wayland-[0-9]+$ ]] || bd_die "nombre de display Wayland inválido: '$wl'"
+    [[ $xdg == "/run/user/$uid" ]] || bd_die "XDG_RUNTIME_DIR inesperado: '$xdg'"
+    [[ -S $xdg/$wl ]] || bd_die "no existe el socket Wayland $xdg/$wl (¿sesión Wayland?)"
+    [[ $xl =~ ^[A-Za-z0-9_,-]*$ && $xv =~ ^[A-Za-z0-9_,-]*$ ]] || bd_die "layout inválido"
+    if systemctl is-active --quiet "$BD_UNIT"; then bd_die "ya hay una sesión Batocera en marcha"; fi
+    exec systemd-run --quiet --unit="$BD_UNIT" --description="Batocera en el escritorio" \
+        --collect --property=KillMode=control-group --property=TimeoutStopSec=60 \
+        --setenv=BD_UID="$uid" --setenv=BD_WAYLAND="$wl" --setenv=BD_XDG="$xdg" \
+        --setenv=BD_XKB_LAYOUT_HOST="$xl" --setenv=BD_XKB_VARIANT_HOST="$xv" \
+        -- "$BD_PREFIX/libexec/bd-session" run
+}
+
+cmd_stop() {
+    need_root
+    systemctl is-active --quiet "$BD_UNIT" || { bd_log "no hay sesión en marcha"; return 0; }
+    systemctl stop "$BD_UNIT"
+}
+
+# ============================================================ run (en la unidad)
+cmd_run() {
+    need_root
+    mkdir -p "$BD_LOGDIR"
+    exec 9>/run/batocera-desktop.lock
+    flock -n 9 || bd_die "ya hay una sesión en marcha"
+    rm -f "$BD_ACTION_FILE"
+    local -a us=(unshare --mount --uts --propagation slave)
+    ((BD_PIDNS)) && us+=(--pid --fork --kill-child=SIGTERM)
+    local act
+    while :; do
+        bd_boot_apply_pending
+        "${us[@]}" -- "$BD_PREFIX/libexec/bd-session" inner
+        act=$(cat "$BD_ACTION_FILE" 2>/dev/null); rm -f "$BD_ACTION_FILE"
+        case $act in
+            reboot) bd_log "reiniciando la sesión de Batocera"; continue ;;
+            poweroff-host) bd_log "apagando el equipo"; systemctl poweroff; break ;;
+            *) break ;;
+        esac
+    done
+    bd_log "sesión terminada"
+}
+
+# ===================================================== preparación del entorno
+bd_on_term() { BD_STOP=1; : "${BD_ACTION:=exit}"; }
+bd_on_usr1() {   # lo envían los shims de shutdown/reboot dentro del chroot
+    local a
+    a=$(cat "$BD_ROOT/run/bd-action" 2>/dev/null)
+    case $a in
+        reboot) BD_ACTION=reboot ;;
+        poweroff) if [[ $BD_ON_SHUTDOWN == host ]]; then BD_ACTION=poweroff-host; else BD_ACTION=exit; fi ;;
+        *) BD_ACTION=exit ;;
+    esac
+    BD_STOP=1
+}
+
+bd_mount_layers() {
+    local o=$BD_RUN/ovl lowers
+    mkdir -p "$o"/{base,base2,overlay,work,saved} "$BD_ROOT"
+    [[ -f $BD_BOOT_DIR/boot/batocera ]] \
+        || bd_die "falta $BD_BOOT_DIR/boot/batocera  (usa: batocera-desktop install)"
+    if [[ -s $BD_BOOT_DIR/boot/overlay ]]; then      # overlay guardado con batocera-save-overlay
+        if mount -o loop,ro "$BD_BOOT_DIR/boot/overlay" "$o/saved"; then
+            cp -a "$o/saved/." "$o/overlay/" || bd_warn "no se pudo copiar el overlay guardado"
+            umount "$o/saved"
+        else
+            bd_warn "no se pudo montar boot/overlay (se ignora)"
+        fi
+    fi
+    mount -o loop,ro "$BD_BOOT_DIR/boot/batocera" "$o/base" || bd_die "no se pudo montar boot/batocera"
+    lowers=$o/base
+    if [[ -f $BD_BOOT_DIR/boot/rufomaculata ]]; then  # segunda capa (el initrd las une)
+        mount -o loop,ro "$BD_BOOT_DIR/boot/rufomaculata" "$o/base2" || bd_die "no se pudo montar boot/rufomaculata"
+        lowers=$lowers:$o/base2
+    fi
+    mount -t overlay overlay -o "rw,lowerdir=$lowers,upperdir=$o/overlay,workdir=$o/work" "$BD_ROOT" \
+        || bd_die "no se pudo montar el overlay del rootfs"
+}
+
+bd_mount_runtime() {
+    local R=$BD_ROOT P S spec src dst opt
+    mkdir -p "$BD_USERDATA"
+    bd_bind "$BD_BOOT_DIR" /boot || return 1
+    bd_bind "$BD_USERDATA" /userdata || return 1
+    bd_bind "$BD_RUN/ovl" /overlay "" rec || return 1
+
+    P=$(bd_rpath "$R" /proc); mkdir -p "$P"
+    mount -t proc -o nosuid,nodev,noexec proc "$P" || return 1
+    # Batocera hace sysctl/sysrq: que no toque el host
+    mount --bind "$P/sys" "$P/sys" && mount -o remount,bind,ro "$P/sys"
+    if [[ -e $P/sysrq-trigger ]]; then
+        mount --bind "$P/sysrq-trigger" "$P/sysrq-trigger" && mount -o remount,bind,ro "$P/sysrq-trigger"
+    fi
+
+    S=$(bd_rpath "$R" /sys); mkdir -p "$S"
+    mount --bind /sys "$S" && mount -o remount,bind,ro "$S"
+    bd_bind /dev /dev "" rec || return 1
+
+    P=$(bd_rpath "$R" /run); mkdir -p "$P"
+    mount -t tmpfs -o mode=0755,nosuid,nodev,size=256M tmpfs "$P" || return 1
+    P=$(bd_rpath "$R" /tmp); mkdir -p "$P"
+    mount -t tmpfs -o mode=1777,nosuid,nodev,size="$BD_TMP_SIZE" tmpfs "$P" || return 1
+
+    [[ -e $(bd_rpath "$R" /var/run) ]] || bd_ln /var/run /run
+    [[ -d /run/udev ]] && bd_bind /run/udev /run/udev ro   # libudev/SDL: clasificación de mandos del host
+    if [[ -n ${BD_XDG:-} && -d $BD_XDG ]]; then bd_bind "$BD_XDG" /run/host-xdg; fi
+    case $BD_BT in
+        host)
+            [[ -S /run/dbus/system_bus_socket ]] && bd_bind /run/dbus/system_bus_socket /run/dbus/system_bus_socket
+            [[ -d /var/lib/bluetooth ]] && bd_bind /var/lib/bluetooth /var/lib/bluetooth ;;
+    esac
+    [[ $BD_BIND_MEDIA == 1 && -d /media ]] && { bd_bind /media /media "" rec; mount --make-rslave "$(bd_rpath "$R" /media)" 2>/dev/null; }
+    [[ $BD_BIND_MODULES == 1 && -d /lib/modules ]] && bd_bind /lib/modules /lib/modules ro
+    for spec in $BD_EXTRA_BINDS; do
+        IFS=: read -r src dst opt <<<"$spec"
+        [[ -e $src && -n $dst ]] || { bd_warn "bind extra ignorado: $spec"; continue; }
+        bd_bind "$src" "$dst" "$opt" rec
+    done
+
+    # resolv.conf (puede ser un symlink en el rootfs; bd_rpath lo resuelve dentro del chroot)
+    dst=$(bd_rleaf "$R" /etc/resolv.conf); mkdir -p "${dst%/*}"
+    rm -f -- "$dst"; cat /etc/resolv.conf >"$dst" 2>/dev/null
+    return 0
+}
+
+bd_inject_files() {
+    local n d l
+    bd_put "$BD_PREFIX/share/chroot/usr/bin/labwc-launch" /usr/bin/labwc-launch 0755 || return 1
+    # batocera-resolution: el original no sabe medir la salida del labwc anidado ("unknown").
+    # Se conserva como .real (salvo que ya sea nuestro shim, p.ej. tras batocera-save-overlay)
+    l=$(bd_rleaf "$BD_ROOT" /usr/bin/batocera-resolution)
+    if [[ -e $l || -L $l ]] && ! grep -qs bd-shim-resolution "$l"; then
+        rm -f -- "$l.real"; cp -a -- "$l" "$l.real" || return 1
+    fi
+    bd_put "$BD_PREFIX/share/chroot/usr/bin/batocera-resolution" /usr/bin/batocera-resolution 0755 || return 1
+    echo "$BD_RESOLUTION" >"$(bd_rpath "$BD_ROOT" /run)/bd-resolution"
+    # shims de apagado: ES llama a shutdown/poweroff/reboot -> volver al escritorio / reiniciar sesión
+    for d in /sbin /usr/sbin /bin /usr/bin; do
+        for n in shutdown poweroff reboot halt; do
+            l=$(bd_rleaf "$BD_ROOT" "$d/$n")
+            if [[ $d == /sbin || -e $l || -L $l ]]; then
+                bd_put "$BD_PREFIX/share/chroot/sbin/power-shim" "$d/$n" 0755
+            fi
+        done
+    done
+    echo $$ >"$(bd_rpath "$BD_ROOT" /run)/bd-session.pid"
+    echo batocera >"$(bd_rpath "$BD_ROOT" /etc)/hostname" 2>/dev/null
+}
+
+bd_prepare_gpu() {
+    BD_GPU_MODE=mesa; BD_RENDER_NODE=""
+    if [[ $BD_GPU != mesa ]] && bd_nvidia_detect; then
+        if bd_nvidia_collect; then
+            if bd_nvidia_stage; then
+                BD_GPU_MODE=nvidia
+                BD_RENDER_NODE=$(bd_render_node nvidia || true)
+                bd_log "GPU: NVIDIA $NV_VER (libs del host enlazadas, ${#NV_LINK[@]} ficheros)"
+            fi
+        else
+            bd_warn "módulo NVIDIA $NV_VER cargado pero no encuentro sus librerías userspace (¿driver actualizado sin reiniciar?)"
+        fi
+    elif [[ $BD_GPU == nvidia ]]; then
+        bd_warn "BD_GPU=nvidia pero no hay módulo nvidia cargado"
+    fi
+    [[ $BD_GPU_MODE == mesa ]] && bd_log "GPU: Mesa (Intel/AMD) con las librerías de Batocera"
+}
+
+bd_build_env() {
+    BD_ENV=(
+        PATH=/usr/bin:/usr/sbin:/bin:/sbin
+        HOME=/userdata/system
+        TERM="${TERM:-linux}"
+        BD_SESSION=1
+        BD_HOST_XDG=/run/host-xdg
+        BD_HOST_WAYLAND="${BD_WAYLAND:-}"
+        BD_WLR_RENDERER="$BD_WLR_RENDERER"
+        BD_RESOLUTION="$BD_RESOLUTION"
+        BD_LABWC_DEBUG="$BD_LABWC_DEBUG"
+        BD_XKB_LAYOUT="${BD_XKB_LAYOUT:-${BD_XKB_LAYOUT_HOST:-}}"
+        BD_XKB_VARIANT="${BD_XKB_VARIANT:-${BD_XKB_VARIANT_HOST:-}}"
+    )
+    [[ -n $BD_RENDER_NODE ]] && BD_ENV+=("BD_RENDER_NODE=$BD_RENDER_NODE")
+    if [[ $BD_AUDIO == host && -n ${BD_XDG:-} ]]; then
+        BD_ENV+=(PULSE_SERVER=unix:/run/host-xdg/pulse/native PIPEWIRE_RUNTIME_DIR=/run/host-xdg)
+    fi
+    if [[ $BD_GPU_MODE == nvidia ]]; then
+        BD_ENV+=(
+            LD_LIBRARY_PATH=/run/bd-nvidia/lib64
+            __EGL_VENDOR_LIBRARY_FILENAMES=/run/bd-nvidia/10_nvidia.json
+            __GLX_VENDOR_LIBRARY_NAME=nvidia
+            VK_DRIVER_FILES=/run/bd-nvidia/nvidia_icd.json
+        )
+    fi
+}
+
+bd_prepare() {
+    mkdir -p "$BD_RUN" "$BD_LOGDIR"
+    mount -t tmpfs -o "size=$BD_OVERLAY_SIZE,mode=0755" tmpfs "$BD_RUN" || { bd_warn "tmpfs falló"; return 1; }
+    bd_mount_layers
+    bd_mount_runtime || return 1
+    bd_prepare_gpu
+    bd_inject_files || return 1
+    bd_build_env
+}
+
+bd_cr() {   # ejecutar un comando en el chroot con el entorno de Batocera
+    env -i "${BD_ENV[@]}" chroot "$BD_ROOT" "$@"
+}
+
+bd_svc() {  # servicio acción
+    local s=$1 a=$2 f
+    [[ -x $(bd_rpath "$BD_ROOT" "/etc/init.d/$s") ]] || { bd_warn "servicio $s no existe, se omite"; return 1; }
+    f=$BD_LOGDIR/service-$s.log
+    bd_log "$s $a  (log: $f)"
+    timeout 600 env -i "${BD_ENV[@]}" chroot "$BD_ROOT" "/etc/init.d/$s" "$a" </dev/null >>"$f" 2>&1
+}
+
+# ------------------------------------------------------------- Bluetooth
+bd_bt_start() {
+    case $BD_BT in
+        host)
+            [[ -S /run/dbus/system_bus_socket ]] || { bd_warn "no hay bus D-Bus del sistema: sin Bluetooth en Batocera"; return; }
+            bd_cr /bin/sh -c 'a=$(batocera-settings-get bluetooth.adapter 2>/dev/null)
+                start-stop-daemon -S -q -m -p /var/run/bluetooth-agent.pid --exec /usr/bin/batocera-bluetooth-agent -- ${a:+--device "$a"} >/dev/null 2>&1 &' \
+                </dev/null >>"$BD_LOGDIR/bluetooth.log" 2>&1 ;;
+        exclusive)
+            bd_warn "BT exclusivo (experimental): se para bluetooth.service del host"
+            systemctl stop bluetooth.service
+            bd_svc S30dbus start; bd_svc S29namebluetooth start; bd_svc S32bluetooth start ;;
+    esac
+}
+bd_bt_stop() {
+    case $BD_BT in
+        host) bd_cr /bin/sh -c 'start-stop-daemon -K -q -p /var/run/bluetooth-agent.pid' </dev/null >/dev/null 2>&1 ;;
+        exclusive) bd_svc S32bluetooth stop; systemctl start bluetooth.service ;;
+    esac
+}
+
+# ----------------------------------------------------------- bucle principal
+bd_wait_session() {
+    local t=0 seen=0 miss=0
+    while ((!BD_STOP)); do
+        if bd_chroot_proc labwc; then
+            seen=1
+        elif ((seen)); then
+            bd_log "el compositor (ventana) se ha cerrado"; break
+        elif ((++t > BD_START_TIMEOUT)); then
+            bd_warn "labwc no arrancó en ${BD_START_TIMEOUT}s; mira /userdata/system/logs/display.log y $BD_ROOT/var/log/labwc.log"
+            BD_RC=1; break
+        fi
+        if ((seen)); then
+            if bd_chroot_proc emulationstation; then miss=0
+            elif ((++miss >= 15)); then bd_log "EmulationStation terminó"; break; fi
+        fi
+        sleep 1 & wait $!
+    done
+}
+
+bd_stop_services() {
+    local i
+    for ((i = ${#SVC_STARTED[@]} - 1; i >= 0; i--)); do bd_svc "${SVC_STARTED[i]}" stop; done
+    bd_bt_stop
+    bd_kill_chroot_procs TERM; sleep 2; bd_kill_chroot_procs KILL
+}
+
+cmd_inner() {
+    need_root
+    trap bd_on_term TERM INT HUP
+    trap bd_on_usr1 USR1
+    hostname batocera 2>/dev/null   # UTS privado: no afecta al host
+    if ! bd_prepare; then BD_ACTION=exit; echo exit >"$BD_ACTION_FILE"; exit 1; fi
+    local s
+    # S04populate crea directorios y lanza `ldconfig &`; esperamos y relanzamos para incluir las libs NVIDIA
+    if bd_svc S04populate start; then
+        for _ in $(seq 150); do bd_chroot_proc ldconfig || break; sleep 0.1; done
+    fi
+    bd_cr ldconfig >>"$BD_LOGDIR/ldconfig.log" 2>&1
+    bd_bt_start
+    for s in $BD_SERVICES; do
+        bd_svc "$s" start && SVC_STARTED+=("$s")
+    done
+    bd_wait_session
+    bd_log "cerrando sesión (acción: $BD_ACTION)"
+    bd_stop_services
+    echo "$BD_ACTION" >"$BD_ACTION_FILE"
+    exit "$BD_RC"
+}
+
+# ------------------------------------------------- shell / enter / update ...
+cmd_enter() {
+    need_root
+    local -a us=(unshare --mount --uts --propagation slave)
+    ((BD_PIDNS)) && us+=(--pid --fork)
+    [[ ${1:-} == -- ]] && shift
+    [[ -n ${SUDO_UID:-} && $SUDO_UID != 0 ]] && export BD_UID=$SUDO_UID BD_XDG=${BD_XDG:-/run/user/$SUDO_UID}
+    exec "${us[@]}" -- "$BD_PREFIX/libexec/bd-session" __enter "$@"
+}
+
+cmd_enter_inner() {
+    hostname batocera-maint 2>/dev/null
+    systemctl is-active --quiet "$BD_UNIT" 2>/dev/null || bd_boot_apply_pending
+    bd_prepare || exit 1
+    # sin sesión Wayland en mantenimiento: BD_WAYLAND puede estar vacío
+    if (($#)); then bd_cr "$@"; else bd_cr /bin/bash -l 2>/dev/null || bd_cr /bin/sh; fi
+}
+
+cmd_update() {   # batocera-desktop update [args de batocera-upgrade]
+    local -a args=("$@")
+    ((${#args[@]})) || args=(--upgrade)
+    cmd_enter -- batocera-upgrade "${args[@]}"
+}
+
+cmd_install() {
+    need_root
+    local file="" dl=0 board=$BD_BOARD type=$BD_UPDATE_TYPE force=0 url md5 tmp
+    while (($#)); do
+        case $1 in
+            --file) file=$2; shift 2 ;;
+            --download) dl=1; shift ;;
+            --board) board=$2; shift 2 ;;
+            --type) type=$2; shift 2 ;;
+            --force) force=1; shift ;;
+            *) bd_die "argumento desconocido: $1" ;;
+        esac
+    done
+    if [[ -e $BD_BOOT_DIR/boot/batocera && $force == 0 ]]; then
+        bd_die "ya hay una instalación en $BD_BOOT_DIR (usa 'update', o --force para reinstalar)"
+    fi
+    if ((dl)); then
+        url=$BD_UPDATE_URL/$board/$type/last/boot.tar.xz
+        mkdir -p "$BD_USERDATA/system/upgrade"
+        file=$BD_USERDATA/system/upgrade/boot.tar.xz
+        bd_log "descargando $url"
+        curl -fL --retry 3 -o "$file" "$url" || bd_die "descarga fallida"
+        if md5=$(curl -fsL "$url.md5"); then
+            [[ $md5 == "$(md5sum "$file" | cut -d' ' -f1)" ]] || bd_die "md5 incorrecto"
+        else bd_warn "sin fichero .md5, no se verifica"; fi
+    fi
+    [[ -f $file ]] || bd_die "indica --file boot.tar.xz o --download"
+    mkdir -p "$BD_BOOT_DIR" "$BD_USERDATA"
+    tmp=$(tar -tJf "$file" boot/batocera.board 2>/dev/null) || bd_die "el tar no parece un boot.tar.xz de Batocera"
+    bd_log "extrayendo en $BD_BOOT_DIR"
+    xz -dc <"$file" | tar -xf - -C "$BD_BOOT_DIR" --no-same-owner || bd_die "fallo al extraer"
+    bd_boot_apply_pending
+    bd_log "instalado: $(cat "$BD_BOOT_DIR/boot/batocera.board" 2>/dev/null)  (${tmp:-?})"
+}
+
+cmd_doctor() {
+    need_root
+    local ok=0 bad=0
+    chk() { if eval "$2" >/dev/null 2>&1; then printf '  [ OK ] %s\n' "$1"; ((ok++)); else printf '  [FALLO] %s\n' "$1"; ((bad++)); fi; }
+    echo "== Herramientas"; local t
+    for t in unshare chroot mount losetup systemd-run flock xz tar curl timeout; do chk "$t" "command -v $t"; done
+    echo "== Instalación de Batocera ($BD_BOOT_DIR)"
+    chk "boot/batocera (squashfs)" "[[ -f $BD_BOOT_DIR/boot/batocera ]]"
+    chk "boot/rufomaculata (segunda capa)" "[[ -f $BD_BOOT_DIR/boot/rufomaculata ]]"
+    chk "board: $(cat "$BD_BOOT_DIR/boot/batocera.board" 2>/dev/null) (se necesita x86-64-v3 para labwc)" \
+        "[[ $(cat "$BD_BOOT_DIR/boot/batocera.board" 2>/dev/null) == x86-64-v3 ]]"
+    chk "sin actualización pendiente sin aplicar" "[[ ! -e $BD_BOOT_DIR/boot/batocera.update ]]"
+    chk "userdata ($BD_USERDATA) existe" "[[ -d $BD_USERDATA ]]"
+    echo "== Sesión de escritorio (usuario ${SUDO_USER:-?})"
+    local xdg=/run/user/${SUDO_UID:-1000} w
+    w=$(cd "$xdg" 2>/dev/null && ls -d wayland-[0-9]* 2>/dev/null | grep -v lock | head -1)
+    chk "socket Wayland (${w:-ninguno})" "[[ -S $xdg/${w:-x} ]]"
+    chk "PipeWire ($xdg/pipewire-0)" "[[ -S $xdg/pipewire-0 ]]"
+    chk "PipeWire-Pulse ($xdg/pulse/native)" "[[ -S $xdg/pulse/native ]]"
+    chk "bus D-Bus del sistema" "[[ -S /run/dbus/system_bus_socket ]]"
+    chk "bluetooth.service activo" "systemctl is-active --quiet bluetooth"
+    echo "== GPU"
+    if bd_nvidia_detect; then
+        echo "  módulo NVIDIA: $NV_VER"
+        chk "nvidia_drm modeset=1" "[[ \$(cat /sys/module/nvidia_drm/parameters/modeset) == Y ]]"
+        chk "librerías userspace $NV_VER encontradas" "bd_nvidia_collect"
+        if bd_nvidia_collect; then
+            local k
+            for k in libGLX_nvidia.so.0 libEGL_nvidia.so.0 libnvidia-allocator.so.1 "libnvidia-glcore.so.$NV_VER" "libnvidia-eglcore.so.$NV_VER"; do
+                chk "  $k" "[[ -n \${NV_LINK[$k]:-} ]]"
+            done
+        fi
+        echo "  nodo render nvidia: $(bd_render_node nvidia || echo no-encontrado)"
+    else
+        echo "  (sin módulo NVIDIA: se usará Mesa)  nodos: $(ls /dev/dri 2>/dev/null | tr '\n' ' ')"
+    fi
+    echo "== Mandos"
+    chk "/dev/uinput" "[[ -e /dev/uinput ]]"
+    chk "módulo uhid (mandos BT)" "grep -q '^uhid ' /proc/modules || [[ -e /dev/uhid ]]"
+    chk "módulo joydev" "grep -q '^joydev ' /proc/modules"
+    echo "== Imagen (dentro del chroot)"
+    if [[ -f $BD_BOOT_DIR/boot/batocera ]]; then
+        local out
+        out=$(cmd_enter -- /bin/sh -c '
+            for f in /usr/bin/labwc /usr/bin/labwc-launch /usr/bin/wlr-randr /usr/bin/emulationstation \
+                     /etc/init.d/S31emulationstation /etc/init.d/S04populate /usr/bin/batocera-upgrade \
+                     /usr/bin/batocera-bluetooth-agent /usr/bin/pactl; do
+                [ -e "$f" ] && echo "OK $f" || echo "NO $f"; done
+            echo "VER $(cat /usr/share/batocera/batocera.version 2>/dev/null)"
+            ls /usr/lib/libEGL_nvidia.so.0 /usr/lib/gbm/nvidia-drm_gbm.so 2>&1 | sed "s/^/LNK /"' 2>&1)
+        while IFS= read -r l; do
+            case $l in OK*) printf '  [ OK ] %s\n' "${l#OK }"; ((ok++)) ;; NO*) printf '  [FALLO] %s\n' "${l#NO }"; ((bad++)) ;; *) echo "  $l" ;; esac
+        done <<<"$out"
+    fi
+    echo; echo "Resultado: $ok OK, $bad fallos"
+    ((bad == 0))
+}
+
+case "${1:-}" in
+    launch)        shift; cmd_launch "$@" ;;
+    stop)          cmd_stop ;;
+    run)           cmd_run ;;
+    inner)         cmd_inner ;;
+    shell|enter)   shift; cmd_enter "$@" ;;
+    __enter)       shift; cmd_enter_inner "$@" ;;
+    update)        shift; cmd_update "$@" ;;
+    install)       shift; cmd_install "$@" ;;
+    doctor)        cmd_doctor ;;
+    apply-pending) need_root; bd_boot_apply_pending ;;
+    *) bd_die "subcomando desconocido: ${1:-}" ;;
+esac

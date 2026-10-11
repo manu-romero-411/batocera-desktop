@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# batocera-desktop - CLI de usuario. Lanza Batocera como una ventana (labwc anidado)
+# en tu sesión Wayland actual. La parte privilegiada vive en libexec/bd-session.
+set -u
+BD_PREFIX=${BD_PREFIX:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}
+SESSION="$BD_PREFIX/libexec/bd-session"
+UNIT=batocera-desktop
+
+usage() {
+cat <<USG
+Uso: batocera-desktop <comando>
+
+  start            Arranca Batocera en una ventana de tu escritorio Wayland
+  stop             Cierra la sesión (limpia todo)
+  restart          stop + start
+  status           ¿Está en marcha?
+  logs [-f]        Registro de la sesión (journal)
+  doctor           Diagnóstico completo (pide sudo)
+  shell [cmd...]   Shell root dentro del entorno Batocera (pide sudo)
+  update [args]    Ejecuta batocera-upgrade dentro (por defecto --upgrade). Reinicia
+                   la sesión después para aplicar. (pide sudo)
+  install [--download|--file boot.tar.xz] [--board x86-64-v3] [--force]
+                   Instala/reinstala la imagen en el directorio de arranque (pide sudo)
+USG
+}
+
+xkb() {  # layout del teclado del host
+    local l="" v=""
+    if [[ -r /etc/default/keyboard ]]; then
+        l=$(sed -n 's/^XKBLAYOUT="\?\([^"]*\)"\?/\1/p' /etc/default/keyboard | head -1)
+        v=$(sed -n 's/^XKBVARIANT="\?\([^"]*\)"\?/\1/p' /etc/default/keyboard | head -1)
+    fi
+    printf '%s\n%s\n' "$l" "$v"
+}
+
+find_wayland() {
+    local d
+    if [[ -n ${WAYLAND_DISPLAY:-} ]]; then basename "$WAYLAND_DISPLAY"; return; fi
+    for d in "$XDG_RUNTIME_DIR"/wayland-[0-9]*; do
+        [[ -S $d ]] && { basename "$d"; return; }
+    done
+}
+
+cmd=${1:-}; shift || true
+case $cmd in
+    start)
+        [[ $EUID -ne 0 ]] || { echo "Ejecútalo como tu usuario, no como root." >&2; exit 1; }
+        XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+        wl=$(find_wayland)
+        [[ -n $wl ]] || { echo "No encuentro una sesión Wayland (¿estás en X11?)." >&2; exit 1; }
+        { read -r kl; read -r kv; } < <(xkb)
+        exec sudo -- "$SESSION" launch --wayland "$wl" --xdg "$XDG_RUNTIME_DIR" \
+            --xkb-layout "$kl" --xkb-variant "$kv" ;;
+    stop)    exec sudo -- "$SESSION" stop ;;
+    restart) sudo -- "$SESSION" stop; exec "$0" start ;;
+    status)  systemctl is-active "$UNIT" 2>/dev/null || true ;;
+    logs)    journalctl -u "$UNIT" --no-pager "${@:--n200}" 2>/dev/null || sudo journalctl -u "$UNIT" --no-pager "${@:--n200}" ;;
+    doctor|shell|update|install) exec sudo -- "$SESSION" "$cmd" "$@" ;;
+    ""|-h|--help|help) usage ;;
+    *) usage; exit 1 ;;
+esac

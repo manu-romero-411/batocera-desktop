@@ -1,0 +1,13 @@
+#!/bin/sh
+# batocera-desktop: sustituye shutdown/poweroff/reboot/halt dentro del chroot.
+# reboot -> reinicia la sesión de Batocera (aplica actualizaciones pendientes)
+# apagar  -> cierra Batocera y vuelve al escritorio (o apaga el host: BD_ON_SHUTDOWN=host)
+action=poweroff
+case "$(basename "$0")" in reboot) action=reboot ;; esac
+for a in "$@"; do
+    case "$a" in -r|--reboot) action=reboot ;; esac
+done
+echo "$action" > /run/bd-action
+pid=$(cat /run/bd-session.pid 2>/dev/null) || exit 1
+kill -USR1 "$pid"
+exit 0

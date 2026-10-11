@@ -1,0 +1,63 @@
+#!/bin/sh
+# batocera-desktop: lanzador de labwc ANIDADO (sustituye al labwc-launch original).
+# S31emulationstation lo invoca igual que en Batocera; aquí labwc usa el backend
+# Wayland de wlroots, es decir, se ejecuta como una ventana del compositor del host.
+
+export LC_ALL=C
+[ -f /etc/profile.d/25-language.sh ] && . /etc/profile.d/25-language.sh
+
+CONF=/userdata/system/.config/labwc
+LOGDIR=/userdata/system/logs
+mkdir -p "$CONF" "$LOGDIR" /var/log
+
+# S14labwc copia rc.xml y autostart por defecto (autostart arranca EmulationStation)
+[ -x /etc/init.d/S14labwc ] && /etc/init.d/S14labwc start
+
+LAYOUT=${BD_XKB_LAYOUT:-$XKB_DEFAULT_LAYOUT}
+VARIANT=${BD_XKB_VARIANT:-$XKB_DEFAULT_VARIANT}
+[ "$LAYOUT" = "en" ] && LAYOUT=us
+{
+    echo "XKB_DEFAULT_LAYOUT=$LAYOUT"
+    echo "XKB_DEFAULT_VARIANT=$VARIANT"
+} > "$CONF/environment"
+
+if [ -z "$BD_HOST_WAYLAND" ]; then
+    echo "batocera-desktop: BD_HOST_WAYLAND vacío, no hay compositor anfitrión" >> "$LOGDIR/display.log"
+    exit 1
+fi
+
+# El compositor anfitrión: socket del host montado en $BD_HOST_XDG
+HOST_DISPLAY="$BD_HOST_XDG/$BD_HOST_WAYLAND"
+unset DISPLAY
+export XDG_RUNTIME_DIR=/var/run          # donde labwc crea su propio wayland-0 (como Batocera)
+export WAYLAND_DISPLAY="$HOST_DISPLAY"   # labwc lo sustituye por wayland-0 para sus hijos
+export WLR_BACKENDS=wayland
+export WLR_RENDERER="${BD_WLR_RENDERER:-gles2}"
+export WLR_NO_HARDWARE_CURSORS=1
+[ -n "$BD_RENDER_NODE" ] && export WLR_RENDER_DRM_DEVICE="$BD_RENDER_NODE"
+
+{
+    echo "batocera-desktop: labwc anidado en $HOST_DISPLAY  renderer=$WLR_RENDERER node=${BD_RENDER_NODE:-auto} layout=$LAYOUT"
+} >> "$LOGDIR/display.log"
+
+# wlroots (backend wayland) crea la salida a 1280x720: fijar el tamaño por defecto en cuanto
+# labwc esté arriba. wlr-randr debe hablar con el labwc anidado, no con el host.
+(
+    export XDG_RUNTIME_DIR=/var/run WAYLAND_DISPLAY=wayland-0
+    want=${BD_RESOLUTION:-1920x1080}
+    i=0
+    while [ $i -lt 100 ]; do
+        out=$(wlr-randr 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) ".*/\1/p' | head -n1)
+        [ -n "$out" ] && break
+        i=$((i + 1)); sleep 0.2
+    done
+    if [ -n "$out" ]; then
+        wlr-randr --output "$out" --custom-mode "$want" >> "$LOGDIR/display.log" 2>&1 \
+            && echo "batocera-desktop: $out -> $want" >> "$LOGDIR/display.log" \
+            || echo "batocera-desktop: wlr-randr no pudo fijar $want en $out" >> "$LOGDIR/display.log"
+    fi
+) &
+
+if [ "$BD_LABWC_DEBUG" = 1 ]; then DBG=-d; else DBG=; fi
+# shellcheck disable=SC2086
+exec /usr/bin/labwc $DBG -C "$CONF" > /var/log/labwc.log 2>&1

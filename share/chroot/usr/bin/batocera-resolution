@@ -1,0 +1,60 @@
+#!/bin/sh
+# bd-shim-resolution
+# batocera-desktop: batocera-resolution para labwc ANIDADO (backend wayland de wlroots).
+#
+# El script original (batocera-resolution.wayland-labwc) saca el tamaño de la lista
+# "Modes:" de wlr-randr. El backend wayland de wlroots no tiene lista de modos (solo un
+# "custom mode" que sigue a la ventana del host), así que wlr-randr no imprime ningún
+# tamaño y el original devuelve "unknown" -> configgen revienta en int("unknown").
+# Aquí: tamaño real medido; el "monitor" es la ventana, nunca se cambia de modo.
+# Todo lo demás (salidas, rotación, getDisplayMode...) lo atiende el original.
+export LC_ALL=C
+REAL=${BD_RES_REAL:-/usr/bin/batocera-resolution.real}
+STATE=${BD_RES_STATE:-/run/bd-resolution}
+LOG=/userdata/system/logs/display.log
+_log() { echo "bd-resolution: $*" >> "$LOG" 2>/dev/null; }
+
+PARGS=
+if [ "$1" = "--screen" ]; then PARGS="--screen $2"; shift 2; fi
+ACTION=$1; [ $# -gt 0 ] && shift
+# shellcheck disable=SC2086
+_real() { "$REAL" $PARGS "$@"; }
+
+_valid() { echo "$1" | grep -qE '^[0-9]+x[0-9]+$'; }
+
+# 1) wlr-randr (vía el original, por si el compositor sí lista modos)
+# 2) cabecera PPM de una captura de grim: es el tamaño real de la ventana
+# 3) valor por defecto de la sesión (BD_RESOLUTION)
+_size() {
+    local s out
+    s=$(_real currentResolution 2>/dev/null | head -n1)
+    if _valid "$s"; then echo "$s"; return; fi
+    out=$(_real currentOutput 2>/dev/null | head -n1)
+    s=$(grim -s 1 ${out:+-o "$out"} -t ppm - 2>/dev/null | head -c 24 | sed -n '2s/ /x/p')
+    if _valid "$s"; then echo "$s"; return; fi
+    s=$(cat "$STATE" 2>/dev/null | head -n1)
+    if _valid "$s"; then echo "$s"; return; fi
+    echo "${BD_RESOLUTION:-1920x1080}"
+}
+
+case "$ACTION" in
+    currentResolution)
+        _size ;;
+    currentMode)
+        # formato original: WxH.<mHz>; si no hay modos, la ventana no tiene refresco propio
+        m=$(_real currentMode 2>/dev/null | head -n1)
+        case "$m" in ""|unknown*) echo "$(_size).60000" ;; *) echo "$m" ;; esac ;;
+    listModes)
+        l=$(_real listModes 2>/dev/null)
+        if [ "$(echo "$l" | grep -c .)" -gt 2 ]; then echo "$l"; else
+            sz=$(_size)
+            echo "max-1920x1080:maximum 1920x1080"
+            echo "max-640x480:maximum 640x480"
+            echo "${sz}.60000:${sz} 60.000 Hz"
+        fi ;;
+    setMode|minTomaxResolution|minTomaxResolution-secure)
+        _log "$ACTION $* ignorado (salida anidada: el modo lo manda la ventana del host)"
+        exit 0 ;;
+    *)
+        _real "$ACTION" "$@" ;;
+esac
