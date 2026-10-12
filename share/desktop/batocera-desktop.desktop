@@ -2,13 +2,8 @@
 Version=1.0
 Type=Application
 Name=Batocera
-Comment=Batocera en una ventana de tu escritorio
+Comment=Batocera in a window of your desktop
 Exec=batocera-desktop start
 Icon=applications-games
 Terminal=false
 Categories=Game;
-Actions=Stop;
-
-[Desktop Action Stop]
-Name=Cerrar Batocera
-Exec=batocera-desktop stop

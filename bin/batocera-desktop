@@ -1,33 +1,37 @@
 #!/usr/bin/env bash
-# batocera-desktop - CLI de usuario. Lanza Batocera como una ventana (labwc anidado)
-# en tu sesión Wayland actual. La parte privilegiada vive en libexec/bd-session.
+# SPDX-License-Identifier: GPL-3.0-or-later
+# batocera-desktop - user CLI. Starts Batocera inside your desktop (nested window) or on a
+# free console (drm, full screen). The privileged part lives in libexec/bd-session.
 set -u
 BD_PREFIX=${BD_PREFIX:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}
 SESSION="$BD_PREFIX/libexec/bd-session"
-UNIT=batocera-desktop
+CONF=${BD_CONF:-/etc/batocera-desktop.conf}
+KWIN_SCRIPT_NAME=batocera-desktop-fullscreen
 
 usage() {
 cat <<USG
-Uso: batocera-desktop <comando>
+Usage: batocera-desktop <command>
 
-  start [--mode auto|nested|drm]
-                   Arranca Batocera. auto: desde un escritorio Wayland -> ventana (labwc
-                   anidado); desde una consola /dev/ttyN sin Wayland -> pantalla completa
-                   directa (DRM/KMS) en esa VT, y se puede cambiar de VT
-  stop             Cierra la sesión (limpia todo)
-  restart          stop + start
-  status           ¿Está en marcha?
-  logs [-f]        Registro de la sesión (journal)
-  doctor           Diagnóstico completo (pide sudo)
-  shell [cmd...]   Shell root dentro del entorno Batocera (pide sudo)
-  update [args]    Ejecuta batocera-upgrade dentro (por defecto --upgrade). Reinicia
-                   la sesión después para aplicar. (pide sudo)
+  start [--mode auto|nested|drm] [--windowed]
+        Run Batocera now, in this terminal. Ctrl+C (or ES "Shutdown") ends it.
+          * inside a Wayland session  -> nested: a fullscreen window of your desktop
+                                         (Alt+Tab back to the desktop)
+          * on a text console, no Wayland/X11 -> drm: full screen, owns the displays
+        --windowed     nested: do not ask the host compositor for fullscreen
+  doctor           Full diagnostics (asks for sudo)
+  shell [cmd...]   Root shell inside the Batocera environment (asks for sudo)
+  update [args]    Run batocera-upgrade inside (default --upgrade); applied on the next start
   install [--download|--file boot.tar.xz] [--board x86-64-v3] [--force]
-                   Instala/reinstala la imagen en el directorio de arranque (pide sudo)
+                   Install/reinstall the image into the boot directory (asks for sudo)
+  uninstall        Remove the software, keep your config, image and data (sudo)
+  purge            Remove EVERYTHING: software, config, image, userdata, logs (sudo)
+
+Running it as a service (drm mode on the first free console from tty8 up) is systemd's job:
+  sudo systemctl start|stop|status batocera-desktop      sudo systemctl enable batocera-desktop
 USG
 }
 
-xkb() {  # layout del teclado del host
+xkb() {  # host keyboard layout
     local l="" v=""
     if [[ -r /etc/default/keyboard ]]; then
         l=$(sed -n 's/^XKBLAYOUT="\?\([^"]*\)"\?/\1/p' /etc/default/keyboard | head -1)
@@ -36,7 +40,7 @@ xkb() {  # layout del teclado del host
     printf '%s\n%s\n' "$l" "$v"
 }
 
-cur_tty() {  # /dev/ttyN de la consola actual (BD_TTY solo para pruebas; root lo revalida)
+cur_tty() {  # /dev/ttyN of the current console (BD_TTY only for tests; root revalidates it)
     local t=${BD_TTY:-}
     [[ -n $t ]] || t=$(tty 2>/dev/null) || true
     [[ $t =~ ^/dev/tty[1-9][0-9]*$ ]] && printf '%s\n' "$t"
@@ -46,44 +50,108 @@ find_wayland() {
     local d
     if [[ -n ${WAYLAND_DISPLAY:-} ]]; then basename "$WAYLAND_DISPLAY"; return; fi
     for d in "$XDG_RUNTIME_DIR"/wayland-[0-9]*; do
-        [[ -S $d ]] && { basename "$d"; return; }
+        [[ -S $d && $d != *.lock ]] && { basename "$d"; return; }
     done
+}
+
+conf_val() { sed -n "s/^$1=[\"']\?\([^\"'#]*\)[\"']\?.*/\1/p" "$CONF" 2>/dev/null | tail -1; }
+
+# ------------------------------------------------ host compositor: fullscreen
+# wlroots' wayland backend never asks for fullscreen by itself, so the HOST compositor must
+# be told to make windows with app_id "wlroots" fullscreen. Best effort: KDE (KWin script),
+# sway and Hyprland. Prints 1 when a rule was installed.
+gdbus_kwin() { gdbus call --session --dest org.kde.KWin "$@" 2>/dev/null; }
+
+kwin_fullscreen() {
+    local class=$1 f id
+    command -v gdbus >/dev/null 2>&1 || return 1
+    f=${XDG_RUNTIME_DIR:-/tmp}/$KWIN_SCRIPT_NAME.js
+    cat >"$f" <<JS
+const CLS = "$class";
+function bdFullscreen(w) {
+    if (w && (w.resourceClass == CLS || w.resourceName == CLS)) { w.fullScreen = true; }
+}
+const list = (typeof workspace.windowList === "function") ? workspace.windowList() : workspace.clientList();
+list.forEach(bdFullscreen);
+(workspace.windowAdded || workspace.clientAdded).connect(bdFullscreen);
+JS
+    gdbus_kwin --object-path /Scripting --method org.kde.kwin.Scripting.unloadScript "$KWIN_SCRIPT_NAME" >/dev/null
+    id=$(gdbus_kwin --object-path /Scripting --method org.kde.kwin.Scripting.loadScript "$f" "$KWIN_SCRIPT_NAME" \
+         | sed -n 's/^(\(int32 \)\?\(-\?[0-9]*\),).*/\2/p')
+    [[ $id =~ ^[0-9]+$ ]] || return 1
+    gdbus_kwin --object-path "/Scripting/Script$id" --method org.kde.kwin.Script.run >/dev/null \
+        || gdbus_kwin --object-path /Scripting --method org.kde.kwin.Scripting.start >/dev/null
+}
+
+host_fullscreen() {
+    local class
+    class=$(conf_val BD_HOST_WINDOW_CLASS); class=${class:-wlroots}
+    [[ $class =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+    if [[ ${XDG_CURRENT_DESKTOP:-} == *KDE* ]]; then
+        kwin_fullscreen "$class" && echo 1
+    elif [[ -n ${SWAYSOCK:-} ]] && command -v swaymsg >/dev/null; then
+        swaymsg "for_window [app_id=\"$class\"] fullscreen enable" >/dev/null 2>&1 && echo 1
+    elif [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && command -v hyprctl >/dev/null; then
+        hyprctl keyword windowrulev2 "fullscreen,class:^($class)\$" >/dev/null 2>&1 && echo 1
+    fi
+    return 0
+}
+
+host_fullscreen_off() {
+    [[ ${XDG_CURRENT_DESKTOP:-} == *KDE* ]] && command -v gdbus >/dev/null 2>&1 \
+        && gdbus_kwin --object-path /Scripting --method org.kde.kwin.Scripting.unloadScript "$KWIN_SCRIPT_NAME" >/dev/null
+    return 0
 }
 
 cmd=${1:-}; shift || true
 case $cmd in
     start)
-        [[ $EUID -ne 0 ]] || { echo "Ejecútalo como tu usuario, no como root." >&2; exit 1; }
+        [[ $EUID -ne 0 ]] || { echo "Run it as your user, not as root." >&2; exit 1; }
         XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
-        mode=${BD_MODE:-auto}
+        mode=auto; fsopt=$(conf_val BD_FULLSCREEN); fsopt=${fsopt:-auto}
         while (($#)); do
             case $1 in
+                --windowed) fsopt=0; shift ;;
                 --mode) mode=${2:-}; shift 2 ;;
                 *) usage; exit 1 ;;
             esac
         done
         case $mode in auto|nested|drm) ;; *) echo "--mode: auto|nested|drm" >&2; exit 1 ;; esac
         tty=$(cur_tty || true)
+        wl=$(find_wayland || true)
         if [[ $mode == auto ]]; then
-            # una sesión Wayland en curso manda; sin ella, una VT de texto -> DRM directo
-            if [[ -n ${WAYLAND_DISPLAY:-} ]]; then mode=nested
+            # a Wayland session around us wins; X11 is not supported; otherwise a text console -> drm
+            if [[ -n $wl ]]; then mode=nested
+            elif [[ -n ${DISPLAY:-} ]]; then
+                echo "You are inside an X11 session, which is not supported. Use a Wayland session, or run this from a text console (Ctrl+Alt+F3)." >&2
+                exit 1
             elif [[ -n $tty ]]; then mode=drm
-            else mode=nested; fi
+            else
+                echo "Not in a Wayland session nor on a text console. For an unattended start use: sudo systemctl start batocera-desktop" >&2
+                exit 1
+            fi
         fi
         if [[ $mode == drm ]]; then
-            [[ -n $tty ]] || { echo "El modo drm se lanza desde una consola /dev/ttyN (Ctrl+Alt+F3, login)." >&2; exit 1; }
+            [[ -n $tty ]] || { echo "drm mode must be started from a /dev/ttyN console (Ctrl+Alt+F3, log in)." >&2; exit 1; }
             exec sudo -- "$SESSION" launch --mode drm --tty "$tty" --xdg "$XDG_RUNTIME_DIR"
         fi
-        wl=$(find_wayland)
-        [[ -n $wl ]] || { echo "No encuentro una sesión Wayland (¿estás en X11?). Desde una consola usa --mode drm." >&2; exit 1; }
+        [[ -n $wl ]] || { echo "No Wayland session found (are you on X11?). From a console use --mode drm." >&2; exit 1; }
+        args=(--mode nested --xdg "$XDG_RUNTIME_DIR" --wayland "$wl")
         { read -r kl; read -r kv; } < <(xkb)
-        exec sudo -- "$SESSION" launch --mode nested --wayland "$wl" --xdg "$XDG_RUNTIME_DIR" \
-            --xkb-layout "$kl" --xkb-variant "$kv" ;;
-    stop)    exec sudo -- "$SESSION" stop ;;
-    restart) sudo -- "$SESSION" stop; exec "$0" start ;;
-    status)  systemctl is-active "$UNIT" 2>/dev/null || true ;;
-    logs)    journalctl -u "$UNIT" --no-pager "${@:--n200}" 2>/dev/null || sudo journalctl -u "$UNIT" --no-pager "${@:--n200}" ;;
+        args+=(--xkb-layout "$kl" --xkb-variant "$kv")
+        fs=""
+        if [[ $fsopt != 0 ]]; then
+            fs=$(host_fullscreen)
+            [[ -n $fs ]] || echo "Note: could not ask your compositor for fullscreen (supported: KDE, sway, Hyprland); use its fullscreen shortcut on the Batocera window." >&2
+        fi
+        args+=(--fullscreen "${fs:-0}")
+        # not exec: we undo the compositor rule when Batocera ends
+        trap 'host_fullscreen_off' EXIT
+        sudo -- "$SESSION" launch "${args[@]}"
+        exit $? ;;
     doctor|shell|update|install) exec sudo -- "$SESSION" "$cmd" "$@" ;;
+    uninstall)    exec sudo -- "$BD_PREFIX/uninstall.sh" --uninstall "$@" ;;
+    purge)        exec sudo -- "$BD_PREFIX/uninstall.sh" --purge "$@" ;;
     ""|-h|--help|help) usage ;;
     *) usage; exit 1 ;;
 esac

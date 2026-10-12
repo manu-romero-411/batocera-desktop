@@ -1,7 +1,5 @@
-#!/bin/bash
-
-sudo bash install.sh --uninstall
-sudo rm -f /etc/batocera-desktop.conf
-sudo rm -rf /var/log/batocera-desktop
-sudo rm -rf /boot/batocera /batocera
-exit 0
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Convenience wrapper: ./uninstall.sh            -> remove the software only
+#                      ./uninstall.sh --purge    -> remove EVERYTHING (config, image, userdata, logs)
+exec sudo "$(dirname "$(readlink -f "$0")")/install.sh" "${@:---uninstall}"

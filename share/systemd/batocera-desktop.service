@@ -1,0 +1,17 @@
+[Unit]
+Description=Batocera desktop environment (full screen on the first free console)
+Documentation=https://github.com/OWNER/batocera-desktop
+After=systemd-user-sessions.service systemd-logind.service
+Wants=systemd-logind.service
+
+[Service]
+Type=simple
+# No BD_MODE: service start = drm mode on the first free VT >= BD_TTY_MIN (see the config).
+# Audio comes from the PipeWire of BD_USER (config), started on demand.
+ExecStart=@PREFIX@/libexec/bd-session run
+KillMode=control-group
+TimeoutStopSec=60
+Restart=no
+
+[Install]
+WantedBy=graphical.target

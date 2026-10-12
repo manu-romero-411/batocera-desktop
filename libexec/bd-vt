@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# bd-vt - VT helpers for batocera-desktop (drm mode). Runs as root.
+#   save  /dev/ttyN   saves the current keyboard mode (before labwc turns it off)
+#   reset /dev/ttyN   KD_TEXT + keyboard + VT_AUTO: what libseat would restore if labwc
+#                     had not died with SIGKILL (S31emulationstation `stop` runs
+#                     `killall -9 labwc`)
+#   activate N        switch to VT N
+import fcntl, os, struct, sys
+
+KDSETMODE, KD_TEXT = 0x4B3A, 0
+KDGKBMODE, KDSKBMODE, K_UNICODE, K_OFF = 0x4B44, 0x4B45, 3, 4
+VT_SETMODE, VT_AUTO = 0x5602, 0
+VT_ACTIVATE, VT_WAITACTIVE = 0x5606, 0x5607
+SAVED = "/run/batocera-desktop.vtkb"
+
+
+def opentty(path):
+    if not (path.startswith("/dev/tty") and path[8:].isdigit()):
+        sys.exit(f"bd-vt: invalid tty: {path}")
+    try:
+        return os.open(path, os.O_RDWR | os.O_NOCTTY)
+    except OSError as e:
+        sys.exit(f"bd-vt: could not open {path}: {e}")
+
+
+def main():
+    if len(sys.argv) < 3:
+        sys.exit(__doc__)
+    cmd, arg = sys.argv[1], sys.argv[2]
+    if cmd == "save":
+        fd = opentty(arg)
+        buf = bytearray(4)
+        fcntl.ioctl(fd, KDGKBMODE, buf)
+        mode = struct.unpack("i", bytes(buf))[0]
+        if mode != K_OFF:
+            with open(SAVED, "w") as f:
+                f.write(f"{mode}\n")
+    elif cmd == "reset":
+        fd = opentty(arg)
+        try:
+            kb = int(open(SAVED).read().strip())
+        except (OSError, ValueError):
+            kb = K_UNICODE
+        if kb == K_OFF:
+            kb = K_UNICODE
+        rc = 0
+        for req, val in ((KDSETMODE, KD_TEXT), (KDSKBMODE, kb)):
+            try:
+                fcntl.ioctl(fd, req, val)
+            except OSError as e:
+                print(f"bd-vt: ioctl {req:#x}: {e}", file=sys.stderr)
+                rc = 1
+        try:
+            fcntl.ioctl(fd, VT_SETMODE, struct.pack("bbhhh", VT_AUTO, 0, 0, 0, 0))
+        except OSError as e:
+            print(f"bd-vt: VT_SETMODE: {e}", file=sys.stderr)
+            rc = 1
+        sys.exit(rc)
+    elif cmd == "activate":
+        n = int(arg)
+        fd = os.open("/dev/tty0", os.O_RDWR | os.O_NOCTTY)
+        fcntl.ioctl(fd, VT_ACTIVATE, n)
+        fcntl.ioctl(fd, VT_WAITACTIVE, n)
+    else:
+        sys.exit(__doc__)
+
+
+main()

@@ -1,0 +1,22 @@
+#!/bin/sh
+# batocera-desktop: copy the HOST's audio state into batocera.conf (SHARE partition).
+# Runs inside the chroot before EmulationStation starts. batocera-audio/pactl talk to the host's
+# PipeWire-Pulse through PULSE_SERVER, so the *current* values are the host's; we only persist
+# them where ES looks (audio.device / audio.profile / audio.volume). The squashfs is untouched.
+export LC_ALL=C
+CONF=/userdata/system/batocera.conf
+log() { echo "bd-audio-inherit: $*"; }
+
+pactl info >/dev/null 2>&1 || { log "host audio server unreachable (PULSE_SERVER=${PULSE_SERVER:-unset})"; exit 1; }
+[ -e "$CONF" ] || { log "$CONF does not exist yet, nothing to update"; exit 0; }
+
+dev=$(batocera-audio get 2>/dev/null | head -n1 | cut -f1)
+prof=$(batocera-audio get-profile 2>/dev/null | head -n1 | cut -f1)
+vol=$(batocera-audio getSystemVolume 2>/dev/null | head -n1)
+mute=$(batocera-audio getSystemMute 2>/dev/null | head -n1)
+
+[ -n "$dev" ]  && batocera-settings-set audio.device  "$dev"
+[ -n "$prof" ] && batocera-settings-set audio.profile "$prof"
+case "$vol" in ''|*[!0-9]*) ;; *) batocera-settings-set audio.volume "$vol" ;; esac
+log "device=${dev:-?} profile=${prof:-?} volume=${vol:-?} mute=${mute:-?}"
+exit 0

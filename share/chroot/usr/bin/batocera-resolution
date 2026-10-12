@@ -1,13 +1,13 @@
 #!/bin/sh
 # bd-shim-resolution
-# batocera-desktop: batocera-resolution para labwc ANIDADO (backend wayland de wlroots).
+# batocera-desktop: batocera-resolution for the NESTED labwc (wlroots wayland backend).
 #
-# El script original (batocera-resolution.wayland-labwc) saca el tamaño de la lista
-# "Modes:" de wlr-randr. El backend wayland de wlroots no tiene lista de modos (solo un
-# "custom mode" que sigue a la ventana del host), así que wlr-randr no imprime ningún
-# tamaño y el original devuelve "unknown" -> configgen revienta en int("unknown").
-# Aquí: tamaño real medido; el "monitor" es la ventana, nunca se cambia de modo.
-# Todo lo demás (salidas, rotación, getDisplayMode...) lo atiende el original.
+# The stock script (batocera-resolution.wayland-labwc) reads the size from the "Modes:" list
+# of wlr-randr. wlroots' wayland backend has no mode list (only a "custom mode" that follows
+# the host window), so wlr-randr prints no size and the stock script answers "unknown" ->
+# configgen crashes in int("unknown").
+# Here: the real size is measured; the "monitor" is the window and its mode is never changed.
+# Everything else (outputs, rotation, getDisplayMode...) is served by the original.
 export LC_ALL=C
 REAL=${BD_RES_REAL:-/usr/bin/batocera-resolution.real}
 STATE=${BD_RES_STATE:-/run/bd-resolution}
@@ -22,9 +22,9 @@ _real() { "$REAL" $PARGS "$@"; }
 
 _valid() { echo "$1" | grep -qE '^[0-9]+x[0-9]+$'; }
 
-# 1) wlr-randr (vía el original, por si el compositor sí lista modos)
-# 2) cabecera PPM de una captura de grim: es el tamaño real de la ventana
-# 3) valor por defecto de la sesión (BD_RESOLUTION)
+# 1) wlr-randr (through the original, in case the compositor does list modes)
+# 2) PPM header of a grim screenshot: the real window size
+# 3) the session default (BD_RESOLUTION)
 _size() {
     local s out
     s=$(_real currentResolution 2>/dev/null | head -n1)
@@ -41,7 +41,7 @@ case "$ACTION" in
     currentResolution)
         _size ;;
     currentMode)
-        # formato original: WxH.<mHz>; si no hay modos, la ventana no tiene refresco propio
+        # original format: WxH.<mHz>; without modes the window has no refresh rate of its own
         m=$(_real currentMode 2>/dev/null | head -n1)
         case "$m" in ""|unknown*) echo "$(_size).60000" ;; *) echo "$m" ;; esac ;;
     listModes)
@@ -53,7 +53,7 @@ case "$ACTION" in
             echo "${sz}.60000:${sz} 60.000 Hz"
         fi ;;
     setMode|minTomaxResolution|minTomaxResolution-secure)
-        _log "$ACTION $* ignorado (salida anidada: el modo lo manda la ventana del host)"
+        _log "$ACTION $* ignored (nested output: the host window decides the mode)"
         exit 0 ;;
     *)
         _real "$ACTION" "$@" ;;

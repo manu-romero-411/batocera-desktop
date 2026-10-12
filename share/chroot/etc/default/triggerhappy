@@ -1,0 +1,15 @@
+# --- batocera-desktop begin (generated; everything below this line is replaced on each start) ---
+# Sourced by /etc/init.d/S50triggerhappy. Adds volume keys to Batocera's stock key map, which
+# has none on x86. Skipped when the user supplies their own multimedia_keys.conf.
+if [ "$CONFPATH" != /userdata/system/configs/multimedia_keys.conf ] && [ "$CONFFILE" != multimedia_keys_disabled.conf ]; then
+    BD_KEYS=/run/bd-multimedia_keys.conf
+    {
+        cat "$CONFPATH"
+        echo "KEY_VOLUMEUP   1 /usr/bin/batocera-audio setSystemVolume +@STEP@"
+        echo "KEY_VOLUMEUP   2 /usr/bin/batocera-audio setSystemVolume +@STEP@"
+        echo "KEY_VOLUMEDOWN 1 /usr/bin/batocera-audio setSystemVolume -@STEP@"
+        echo "KEY_VOLUMEDOWN 2 /usr/bin/batocera-audio setSystemVolume -@STEP@"
+        echo "KEY_MUTE       1 /usr/bin/batocera-audio setSystemVolume mute-toggle"
+    } > "$BD_KEYS"
+    DAEMON_ARGS="--daemon --triggers $BD_KEYS --socket /var/run/thd.socket --pidfile $PIDFILE /dev/input/event*"
+fi

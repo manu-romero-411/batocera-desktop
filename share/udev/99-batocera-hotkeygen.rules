@@ -1,0 +1,3 @@
+# batocera-desktop: Batocera's hotkeygen creates a virtual keyboard "batocera hotkeys" (uinput).
+# Same rule Batocera ships: keep the host from treating it as a mouse or a joystick.
+SUBSYSTEM=="input", KERNEL=="event*", ACTION=="add", ATTRS{name}=="batocera hotkeys", ENV{ID_INPUT_JOYSTICK}="0", ENV{ID_INPUT_MOUSE}="0"
