@@ -3,6 +3,9 @@
 # bd-common.sh - shared helpers for batocera-desktop
 # Sourced by libexec/bd-session.
 
+# shellcheck source=bd-variants.sh
+. "$(dirname "${BASH_SOURCE[0]}")/bd-variants.sh"
+
 BD_CONF="${BD_CONF:-/etc/batocera-desktop.conf}"
 BD_UNIT=batocera-desktop
 BD_ACTION_FILE=/run/batocera-desktop.action
@@ -25,6 +28,8 @@ bd_load_config() {
         # shellcheck disable=SC1090
         . "$BD_CONF"
     fi
+    : "${BD_VARIANT:=v3}"                   # v3 | x86_64 | 5.26-amd64 | 5.26-i386  (see lib/bd-variants.sh)
+    bd_profile "$BD_VARIANT" || bd_die "unknown BD_VARIANT '$BD_VARIANT' in $BD_CONF (valid: ${BD_VARIANTS[*]})"
     : "${BD_BOOT_DIR:=/boot/batocera}"      # copy of the BATOCERA partition (contains boot/batocera)
     : "${BD_USERDATA:=/batocera}"           # becomes /userdata inside Batocera
     : "${BD_RUN:=/run/batocera-desktop}"
@@ -33,13 +38,15 @@ bd_load_config() {
     : "${BD_EXTRA_BINDS:=}"                 # "src:dst[:ro] ..." e.g. "/games:/games"
     : "${BD_BIND_MEDIA:=1}"
     : "${BD_BIND_MODULES:=1}"
-    : "${BD_BOARD:=x86-64-v3}"
+    : "${BD_BOARD:=$P_BOARD}"
     : "${BD_UPDATE_URL:=https://updates.batocera.org}"
     : "${BD_UPDATE_TYPE:=stable}"
     : "${BD_GPU:=auto}"                     # auto | nvidia | mesa
     : "${BD_AUDIO:=host}"                   # host | none
     : "${BD_BT:=host}"                      # host | exclusive | off
-    : "${BD_SERVICES:=S12populateshare S50triggerhappy S97joycond S31emulationstation S90hotkeygen S99userservices}"
+    : "${BD_SERVICES:=$P_SERVICES}"
+    : "${BD_URL_526_AMD64:=}"               # download URLs for the 5.26 builds (a boot.tar.xz); empty = use --file/--img
+    : "${BD_URL_526_I386:=}"
     : "${BD_ON_SHUTDOWN:=exit}"             # exit | host  (what "Shutdown" does in ES)
     : "${BD_PIDNS:=1}"
     : "${BD_WLR_RENDERER:=gles2}"
@@ -58,6 +65,8 @@ bd_load_config() {
     : "${BD_XKB_VARIANT:=}"
     : "${BD_NVIDIA_HOST_EGL_PLATFORM:=0}"   # 1 = also use the host's libnvidia-egl-*
     : "${BD_NVIDIA_VERSION_FILE:=/sys/module/nvidia/version}"
+    : "${BD_X11_BUSID:=}"                   # X11 variants: pin Xorg to one GPU, "PCI:bus:dev:func" (hybrid machines)
+    : "${BD_X11_DRIVER:=modesetting}"       # Xorg driver used with BD_X11_BUSID when the GPU is not NVIDIA
     : "${BD_START_TIMEOUT:=90}"
     BD_ROOT="$BD_RUN/root"
 }
@@ -159,6 +168,33 @@ bd_boot_apply_pending() {
             fi
         done <"$b/boot.stale"
         rm -f -- "$b/boot.stale"
+    fi
+}
+
+# X11 variants: Xorg must run on OUR vt. Wrap the server (see share/chroot/usr/bin/Xorg-shim).
+bd_inject_xorg() {
+    local l
+    [[ -n ${BD_TTY:-} ]] && echo "${BD_TTY#/dev/tty}" >"$(bd_rpath "$BD_ROOT" /run)/bd-vt"
+    l=$(bd_rleaf "$BD_ROOT" /usr/bin/Xorg)
+    if [[ ! -e $l && ! -L $l ]]; then
+        bd_warn "no /usr/bin/Xorg in this image: X11 start-up will fail (run: batocera-desktop doctor)"; return 0
+    fi
+    if ! grep -qs bd-shim-xorg "$l" 2>/dev/null; then     # not already our shim (e.g. saved overlay)
+        rm -f -- "$l.real"; cp -a -- "$l" "$l.real" || return 1
+    fi
+    bd_put "$BD_PREFIX/share/chroot/usr/bin/Xorg-shim" /usr/bin/Xorg 0755
+}
+
+# 5.26 talks to ALSA directly. If the image has the ALSA->Pulse plugin, route it to the host's
+# PulseAudio/PipeWire-Pulse socket (PULSE_SERVER) so it does not fight the host for the card.
+bd_inject_alsa_pulse() {
+    [[ $BD_AUDIO == host ]] || return 0
+    local p
+    p=$(bd_rpath "$BD_ROOT" /usr/lib/alsa-lib)
+    if ls "$p"/libasound_module_pcm_pulse.so >/dev/null 2>&1; then
+        printf 'pcm.!default { type pulse }\nctl.!default { type pulse }\n' >"$(bd_rleaf "$BD_ROOT" /etc/asound.conf)"
+    else
+        bd_warn "this ${BD_VARIANT} image has no ALSA pulse plugin: it will use ALSA directly and may fight the host for the sound card (set BD_AUDIO=none, or release the card on the host)"
     fi
 }
 
@@ -276,6 +312,96 @@ EOF
         bd_ln /usr/share/vulkan/icd.d/nvidia_icd.x86_64.json /run/bd-nvidia/nvidia_icd.json
     fi
     return 0
+}
+
+# ------------------------------------------------------------ X11 builds: GPU setup
+# Intel / AMD (and anything with an open driver): nothing to do. The image's own Xorg modules
+# (modesetting, amdgpu, radeon, ...) and Mesa drive the GPU through the host kernel's DRM driver.
+# NVIDIA proprietary: Xorg needs the HOST driver's nvidia_drv.so and libglxserver_nvidia.so (they must
+# match the loaded kernel module, as the GL libraries do), plus a Device section that selects them.
+
+# 0000:01:00.0 -> PCI:1:0:0 (decimal, as xorg.conf wants it)
+bd_pci_busid() {
+    local n=${1##*/}
+    [[ $n =~ ^[0-9a-fA-F]{4}:([0-9a-fA-F]{2}):([0-9a-fA-F]{2})\.([0-7])$ ]] || return 1
+    printf 'PCI:%d:%d:%d\n' "$((16#${BASH_REMATCH[1]}))" "$((16#${BASH_REMATCH[2]}))" "${BASH_REMATCH[3]}"
+}
+
+# BusID of the first display controller bound to the nvidia kernel driver
+bd_nvidia_busid() {
+    local d
+    for d in "${BD_PCI_ROOT:-/sys/bus/pci/devices}"/*; do
+        [[ -L $d/driver && -r $d/class ]] || continue
+        [[ $(<"$d/class") == 0x03* && $(basename "$(readlink "$d/driver")") == nvidia ]] || continue
+        bd_pci_busid "$d" && return 0
+    done
+    return 1
+}
+
+# Finds the host's X driver + GLX server module. Sets NV_XDRV and NV_XGLX (real paths).
+bd_nvidia_xcollect() {
+    NV_XDRV=""; NV_XGLX=""
+    local d f real
+    local -a dirs
+    if [[ -n ${BD_NVIDIA_XDIRS:-} ]]; then read -r -a dirs <<<"$BD_NVIDIA_XDIRS"
+    else dirs=(/usr/lib/x86_64-linux-gnu/nvidia/xorg /usr/lib/x86_64-linux-gnu/nvidia/current /usr/lib/nvidia/xorg
+               /usr/lib64/nvidia/xorg /usr/lib/xorg/modules/drivers /usr/lib/xorg/modules/extensions
+               /usr/lib64/xorg/modules/drivers /usr/lib64/xorg/modules/extensions /usr/lib/x86_64-linux-gnu/xorg/extra-modules); fi
+    for d in "${dirs[@]}"; do
+        [[ -d $d ]] || continue
+        [[ -z $NV_XDRV && -e $d/nvidia_drv.so ]] && NV_XDRV=$(readlink -f -- "$d/nvidia_drv.so")
+        if [[ -z $NV_XGLX ]]; then
+            for f in "$d/libglxserver_nvidia.so.$NV_VER" "$d/libglxserver_nvidia.so"; do
+                [[ -e $f ]] || continue
+                real=$(readlink -f -- "$f")
+                [[ $real == *".so.$NV_VER" ]] && { NV_XGLX=$real; break; }
+            done
+        fi
+    done
+    [[ -n $NV_XDRV && -n $NV_XGLX ]]
+}
+
+# Exposes them in the chroot as /run/bd-nvidia/xorg/{nvidia_drv.so,libglxserver_nvidia.so}
+# (host directories bind-mounted read-only, symlinks on top: nothing is copied).
+bd_nvidia_xstage() {
+    local S x i=0 dir f name
+    S=$(bd_rpath "$BD_ROOT" /run/bd-nvidia) || return 1
+    mkdir -p "$S/xorg"
+    for f in "$NV_XDRV:nvidia_drv.so" "$NV_XGLX:libglxserver_nvidia.so"; do
+        x=${f%%:*}; name=${f##*:}; dir=${x%/*}
+        mkdir -p "$S/xhost/$i"
+        mount --bind "$dir" "$S/xhost/$i" && mount -o remount,bind,ro "$S/xhost/$i" \
+            || { bd_warn "cannot mount $dir"; return 1; }
+        ln -sfn "/run/bd-nvidia/xhost/$i/${x##*/}" "$S/xorg/$name"
+        ((i++))
+    done
+}
+
+# Writes the xorg.conf.d snippet for this machine to $1 (path of the file, already resolved).
+# $2 = the image's own Xorg module directory as seen inside the chroot.
+bd_x11_gpu_conf() {
+    local out=$1 moddir=${2:-/usr/lib/xorg/modules} drv bus=${BD_X11_BUSID:-}
+    if [[ ${BD_GPU_MODE:-mesa} == nvidia ]]; then
+        drv=nvidia
+        [[ -n $bus ]] || bus=$(bd_nvidia_busid) || bus=""
+    elif [[ -n $bus ]]; then
+        drv=$BD_X11_DRIVER
+    else
+        return 0      # Intel / AMD / anything open: let Xorg autodetect with the image's own drivers
+    fi
+    [[ -z $bus || $bus =~ ^PCI:[0-9]+:[0-9]+:[0-9]+$ ]] || { bd_warn "BD_X11_BUSID '$bus' is not PCI:bus:dev:func: ignored"; bus=""; }
+    [[ $drv =~ ^[A-Za-z0-9_]+$ ]] || { bd_warn "invalid BD_X11_DRIVER '$drv'"; return 1; }
+    mkdir -p "$(dirname "$out")"
+    {
+        echo "# generated by batocera-desktop on every start"
+        if [[ $drv == nvidia ]]; then
+            printf 'Section "Files"\n    ModulePath "/run/bd-nvidia/xorg"\n    ModulePath "%s"\nEndSection\n\n' "$moddir"
+        fi
+        printf 'Section "Device"\n    Identifier "bd-gpu"\n    Driver "%s"\n' "$drv"
+        [[ -n $bus ]] && printf '    BusID "%s"\n' "$bus"
+        [[ $drv == nvidia ]] && printf '    Option "AllowEmptyInitialConfiguration" "true"\n'
+        printf 'EndSection\n'
+    } >"$out"
 }
 
 # --------------------------------------------------------------- utilities

@@ -94,3 +94,34 @@ To measure it yourself: film a screen showing a button press (High-speed phone c
 6. Batocera's own udev rules (light guns, Steam Deck…) are not applied (udevd is the host's).
 7. 32-bit (Wine/Proton 32) and CUDA: only 64-bit libraries are linked.
 8. **Security**: `launch`/`stop` are passwordless sudo and Batocera's services run as root: whoever can write to `<userdata>/system/services` gets root. Keep `BD_USERDATA` owned by root. The service runs the same way.
+
+## 8. Variants (v3, x86_64, 5.26-amd64, 5.26-i386)
+Code: `lib/bd-variants.sh` (rules, profile table), `bd_assert_variant` in `libexec/bd-session`, `share/chroot/usr/bin/Xorg-shim`.
+
+### Eligibility rules (hardware, read from /proc and /sys)
+* **v3**: `lm` + every x86-64-v3 flag (`avx avx2 bmi1 bmi2 f16c fma abm movbe xsave`). Flags, not years: Pentium/Celeron up to Comet Lake and AMD before Excavator have no AVX2 although they are post-2013.
+* **x86_64**: `lm` and not "legacy graphics". **All** display controllers (PCI class 03xx) are examined: Intel GMA ones (ID list `BD_GMA_IDS`, or driver `gma500_gfx`) are legacy, every other GPU counts as capable (NVIDIA, AMD, Intel HD, VM adapters...). One capable GPU is enough, so Core 2 + GMA + GeForce/Radeon, or Atom D525 + ION, gets x86_64. `BD_WEAK_GPU_IDS` lets you mark specific `vendor:device` GPUs as too weak. Only when no GPU is visible at all does the Atom N4xx/N5xx/D4xx/D5xx/N2xxx/D2xxx name (`BD_ATOM_RE`) decide. Bay Trail Atoms (Z37xx) are not netbook Atoms and get x86_64.
+* **5.26-amd64**: `lm` **and** legacy graphics (no capable GPU). Exactly the complement of x86_64's graphics rule, so one machine can never be eligible for both.
+* **5.26-i386**: no `lm` flag. (`lm` shows in /proc/cpuinfo even under a 32-bit kernel: a 64-bit CPU never gets i386.)
+* amd64 variants also need a 64-bit running kernel (`uname -m` = x86_64).
+
+### Where it is enforced
+1. `install.sh` (before copying anything) and `bd-session install` (before downloading/extracting).
+2. After extracting: `boot/batocera.board` must be one of the variant's boards and `usr/share/batocera/batocera.version` must match (5.26 vs 6+); otherwise the image is removed and the install cancelled. `x86_64` and `5.26-amd64` share the board name, hence the version check.
+3. `.bd-variant` marker next to the image; every `run` (manual and service) re-checks hardware, marker and board.
+
+### X11 builds: standalone only
+* Mode `drm` (tty) is reused as is: manual from a text console, or the service on a free VT. The VT/keyboard handling (`bd-vt`) does not care about Wayland vs X.
+* Nested is refused for X11 variants (`launch`, CLI, `run`). A nested X path is possible but untested: run `Xephyr` (or a rootful `Xwayland`) on the host, bind `/tmp/.X11-unix` into the chroot and replace the X launch with a shim that only sets `DISPLAY`. Not implemented.
+* Stock Batocera starts X itself from `S31emulationstation`. We do not replace that; we only wrap `/usr/bin/Xorg` so it always gets *our* `vtN` (the stock launcher may hard-code `vt1`, which would grab the host's console). The original stays as `Xorg.real`; `/run/bd-vt` carries the number.
+* The compositor process to wait for is per variant (`labwc` or `Xorg`).
+* Audio is unchanged for the current X11 build: `pactl`/`batocera-audio` talk to the host's PulseAudio/PipeWire-Pulse socket through `PULSE_SERVER`. For 5.26 (probably ALSA-only), if the image has the ALSA pulse plugin an `asound.conf` routes the default PCM to that socket; otherwise a warning says it will use ALSA directly and may fight the host for the sound card.
+* Hotkeygen only exists in recent images; the 5.26 service list omits it, and missing services are skipped with a warning.
+
+### Not verified (needs a real image / hardware)
+* How the current standard image launches X (the shim assumes `/usr/bin/Xorg` is the server and that the `vtN` argument is honoured); `batocera-desktop doctor` lists the files it expects.
+* Everything about 5.26: that the squashfs/overlay layout and `boot/batocera.board` are as assumed (board names `x86`/`x86_64` are guesses; unknown names fail the install, edit `P_BOARDS`), the real `batocera.version` format, the `--img` partition layout (first partition = BATOCERA with `boot/`), whether an old userland runs happy in this namespace setup, and its audio.
+* NVIDIA on X11 (implemented, untested on hardware): `bd_nvidia_xcollect/xstage` + `bd_x11_gpu_conf` in `lib/bd-common.sh`. Open questions: (a) the host's `nvidia_drv.so` must support the image's Xorg ABI (a legacy 340/390 driver against a recent Xorg will not load; `Xorg.0.log` says so); (b) whether `libglxserver_nvidia.so` is picked up by name through `ModulePath` or the image's own `libglx` wins; (c) an existing `/etc/X11/xorg.conf` in the image would override the snippet. The module path of the image is assumed to be `/usr/lib/xorg/modules` (or `lib64`). A hybrid laptop whose display is on the Intel GPU needs `BD_GPU=mesa`.
+* Intel/AMD on X11 rely on autodetection with the image's own drivers (no config is generated unless `BD_X11_BUSID` is set). Old Mesa in a 5.26 image will not know recent AMD/Intel GPUs: for those machines use the current build.
+* Intel GMA PCI IDs were written from memory of `pci.ids`; check yours with `batocera-desktop detect` and `lspci -nn`. Cedarview (GMA 3600/3650, N2xxx) has no usable 3D driver on Linux at all: it is "allowed" as 5.26-amd64 but will be slow.
+* "Capable" is simply "not Intel GMA". A very old GeForce/Radeon counts as capable; use `BD_WEAK_GPU_IDS` for exceptions.

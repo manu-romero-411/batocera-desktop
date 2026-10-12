@@ -9,17 +9,33 @@ It replaces the old `batocera-chroot` scripts. Design notes, findings and limits
 
 > **Status: experimental.** Developed and tested against a fake Batocera in a sandbox; **not yet validated on real hardware** (NVIDIA, audio, Bluetooth, the real systemd unit). Read "Known limits" first.
 
+## Batocera variants
+Four builds are supported; the installer **refuses (error, nothing installed)** one that does not fit the machine, and every start re-checks it.
+
+| Variant | Build | Display | Allowed on |
+|---|---|---|---|
+| `v3` | current x86-64-v3 | Wayland/labwc: nested window **or** tty | amd64 CPU with the full x86-64-v3 set (AVX, AVX2, BMI1/2, FMA, F16C, LZCNT, MOVBE, XSAVE) |
+| `x86_64` | current standard | X11: tty/standalone only | any amd64 with **at least one capable GPU** (NVIDIA, AMD, non-GMA Intel...), looking at *all* GPUs: a Core 2 with GMA plus a GeForce/Radeon qualifies |
+| `5.26-amd64` | Batocera 5.26 amd64 | X11: tty only | amd64 whose **only** graphics are Intel GMA (Atom netbooks, old laptops): exactly where `x86_64` is refused |
+| `5.26-i386` | Batocera 5.26 i386 | X11: tty only | CPUs that cannot run 64-bit code |
+
+`batocera-desktop detect` shows what this machine is and which variants fit. X11 variants have no nested window; they run full screen on a text console (`batocera-desktop start` from Ctrl+Alt+F3) or on a free console through the systemd service.
+
+### X11 builds and GPUs
+Intel and AMD need nothing extra (the image's Xorg drivers + Mesa over the host kernel's DRM driver). **NVIDIA proprietary**: the host's `nvidia_drv.so` and `libglxserver_nvidia.so` (same version as the loaded kernel module) are bind-mounted read-only and a generated `xorg.conf.d` snippet selects them, pinned to the NVIDIA GPU's BusID. On hybrid machines pick the GPU with `BD_X11_BUSID` / `BD_GPU=mesa` (see the config file). `batocera-desktop doctor` checks that the host modules are found.
+
 ## Requirements
 * Debian 13 or similar: systemd (optional), sudo, util-linux, python3, xz, curl.
-* Batocera image **x86-64-v3 (v43+)**: the one that ships labwc/Wayland.
-* PipeWire with the PulseAudio server (`pipewire-pulse`) for audio.
+* A Batocera image of the chosen variant (see above).
+* PulseAudio or PipeWire with the PulseAudio server (`pipewire-pulse`) for audio.
 * NVIDIA: `nvidia-drm.modeset=1` and the driver's userspace libraries installed on the host.
-* Nested mode: a Wayland session (KDE, GNOME, sway, Hyprland…). X11 is not supported.
+* Nested mode (`v3` only): a Wayland session (KDE, GNOME, sway, Hyprland…). Host X11 sessions are not supported for nesting.
 
 ## Install
 ```bash
-sudo ./install.sh --user YOUR_USER
-batocera-desktop install --download     # if /var/batocera has no x86-64-v3 image yet
+sudo ./install.sh --user YOUR_USER                      # asks which variant (or: --variant v3|x86_64|5.26-amd64|5.26-i386)
+batocera-desktop install --variant v3 --download        # current builds download from updates.batocera.org
+batocera-desktop install --variant 5.26-i386 --img batocera-5.26.img.gz   # 5.26: --img or --file (no default URL)
 batocera-desktop doctor                 # everything OK? otherwise it says what is missing
 batocera-desktop start
 ```
@@ -75,10 +91,10 @@ batocera-desktop purge          # EVERYTHING
 `purge` removes: the program, the systemd unit, sudoers rule, menu entry, `/etc/batocera-desktop.conf`, the Batocera image directory (`BD_BOOT_DIR`), **your userdata (`BD_USERDATA`: roms, BIOS, saves, `batocera.conf`)**, logs, and the legacy `batocera-chroot` leftovers. It lists what it will delete with sizes and requires typing `DELETE` (or `--yes`). Safeguards: it refuses system directories (`/`, `/etc`, `/usr`, `/var`, `/home`, …), home directories, mount points, anything with active mounts below it (stop the session first), and identical boot/userdata paths. It works from the config's paths, so back up first if your roms live there. The same works from the source tree: `sudo ./install.sh --purge`.
 
 ## Tests
-`sudo test/run-tests.sh` (root, `mksquashfs`, `busybox-static`): 58 checks with a fake Batocera. `sudo test/test-install.sh`: installer/uninstaller/purge (touches `/opt`, `/etc`, `/usr/local`: use a VM or container). If something fails on your machine: `batocera-desktop doctor`, `batocera-desktop logs`, `<userdata>/system/logs/display.log` and `batocera-desktop shell cat /var/log/labwc.log` while it runs. On Intel test with `BD_GPU=mesa` (or simply no nvidia module: auto).
+`test/test-variants.sh` (no root): the eligibility matrix against simulated CPUs/GPUs. `sudo test/test-x11.sh`: install/start guards and the Xorg shim. `sudo test/run-tests.sh` (root, `mksquashfs`, `busybox-static`): 58 checks with a fake Batocera. `sudo test/test-install.sh`: installer/uninstaller/purge (touches `/opt`, `/etc`, `/usr/local`: use a VM or container). If something fails on your machine: `batocera-desktop doctor`, `batocera-desktop logs`, `<userdata>/system/logs/display.log` and `batocera-desktop shell cat /var/log/labwc.log` while it runs. On Intel test with `BD_GPU=mesa` (or simply no nvidia module: auto).
 
 ## Known limits
-Requires the x86-64-v3 image; no X11 sessions; unmeasured nested latency; the NVIDIA/audio/Bluetooth/systemd-service paths are untested on real hardware; Batocera's services run as root (keep `BD_USERDATA` root-owned, since `start` uses passwordless sudo). Full list: [`docs/ANALYSIS.md`](docs/ANALYSIS.md#7-known-risks-and-limits).
+X11 variants are tty/standalone only (no nested window); the X11 and 5.26 paths are only unit-tested, never run against a real image (see ANALYSIS §8); unmeasured nested latency; the NVIDIA/audio/Bluetooth/systemd-service paths are untested on real hardware; Batocera's services run as root (keep `BD_USERDATA` root-owned, since `start` uses passwordless sudo). Full list: [`docs/ANALYSIS.md`](docs/ANALYSIS.md#7-known-risks-and-limits).
 
 ## License
 GPL-3.0-or-later, like Batocera itself. See [`LICENSE`](LICENSE).

@@ -18,11 +18,13 @@ Usage: batocera-desktop <command>
                                          (Alt+Tab back to the desktop)
           * on a text console, no Wayland/X11 -> drm: full screen, owns the displays
         --windowed     nested: do not ask the host compositor for fullscreen
+  detect           What this machine is and which Batocera variants it may install (no sudo)
   doctor           Full diagnostics (asks for sudo)
   shell [cmd...]   Root shell inside the Batocera environment (asks for sudo)
   update [args]    Run batocera-upgrade inside (default --upgrade); applied on the next start
-  install [--download|--file boot.tar.xz] [--board x86-64-v3] [--force]
-                   Install/reinstall the image into the boot directory (asks for sudo)
+  install --variant v3|x86_64|5.26-amd64|5.26-i386 [--download|--file boot.tar.xz|--img disk.img[.gz]] [--force]
+                   Install/reinstall the image into the boot directory (asks for sudo).
+                   A variant that does not fit this machine is refused with an error.
   uninstall        Remove the software, keep your config, image and data (sudo)
   purge            Remove EVERYTHING: software, config, image, userdata, logs (sudo)
 
@@ -119,6 +121,20 @@ case $cmd in
         case $mode in auto|nested|drm) ;; *) echo "--mode: auto|nested|drm" >&2; exit 1 ;; esac
         tty=$(cur_tty || true)
         wl=$(find_wayland || true)
+        variant=$(conf_val BD_VARIANT); variant=${variant:-v3}
+        # only the Wayland (v3) build can be nested; the X11 builds run standalone on a console
+        nested_ok=0; [[ $variant == v3 ]] && nested_ok=1
+        if ((!nested_ok)); then
+            if [[ $mode == nested ]]; then
+                echo "Variant $variant is an X11 build: nested mode is not available. Use a text console (Ctrl+Alt+F3) or: sudo systemctl start batocera-desktop" >&2; exit 1
+            fi
+            if [[ $mode == auto ]]; then
+                if [[ -n $tty ]]; then mode=drm
+                else
+                    echo "Variant $variant runs full screen on its own console. Run this from a text console (Ctrl+Alt+F3, log in) or use: sudo systemctl start batocera-desktop" >&2; exit 1
+                fi
+            fi
+        fi
         if [[ $mode == auto ]]; then
             # a Wayland session around us wins; X11 is not supported; otherwise a text console -> drm
             if [[ -n $wl ]]; then mode=nested
@@ -149,6 +165,7 @@ case $cmd in
         trap 'host_fullscreen_off' EXIT
         sudo -- "$SESSION" launch "${args[@]}"
         exit $? ;;
+    detect)       exec "$SESSION" detect ;;
     doctor|shell|update|install) exec sudo -- "$SESSION" "$cmd" "$@" ;;
     uninstall)    exec sudo -- "$BD_PREFIX/uninstall.sh" --uninstall "$@" ;;
     purge)        exec sudo -- "$BD_PREFIX/uninstall.sh" --purge "$@" ;;

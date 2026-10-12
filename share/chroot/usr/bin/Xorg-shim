@@ -1,0 +1,16 @@
+#!/bin/sh
+# bd-shim-xorg
+# batocera-desktop: replaces /usr/bin/Xorg in the X11 variants (the original is kept as Xorg.real).
+# Whatever launches X (xinit/startx/emulationstation-standalone), the server must run on the VT that
+# batocera-desktop owns, not on a hard-coded one (usually vt1, which would steal the host's console).
+REAL=${BD_XORG_REAL:-/usr/bin/Xorg.real}
+VT=$(cat "${BD_VTFILE:-/run/bd-vt}" 2>/dev/null)
+case "$VT" in ''|*[!0-9]*) exec "$REAL" "$@" ;; esac
+c=$#
+while [ "$c" -gt 0 ]; do          # drop any vtN argument the caller passed
+    a=$1; shift
+    case "$a" in vt[0-9]*) ;; *) set -- "$@" "$a" ;; esac
+    c=$((c - 1))
+done
+echo "bd-xorg: $* vt$VT" >> "${BD_DISPLAY_LOG:-/userdata/system/logs/display.log}" 2>/dev/null
+exec "$REAL" "$@" "vt$VT"

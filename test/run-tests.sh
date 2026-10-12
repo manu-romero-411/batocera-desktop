@@ -134,6 +134,9 @@ BD_BIND_MEDIA=0
 BD_BIND_MODULES=0
 BD_START_TIMEOUT=20
 X
+# the suite must not depend on the machine's CPU: pretend to be an AVX2 machine, variant v3
+mkdir -p $T/pci; printf 'model name\t: test cpu\nflags\t\t: fpu lm avx avx2 bmi1 bmi2 f16c fma abm movbe xsave\n' > $T/cpuinfo
+export BD_CPUINFO=$T/cpuinfo BD_PCI_ROOT=$T/pci BD_UNAME_M=x86_64
 export BD_MODE=nested BD_CONF=$T/bd.conf BD_TEST=1 BD_UID=1000 BD_WAYLAND=wayland-0 BD_XDG=$T/xdg
 HOSTNAME_BEFORE=$(hostname)
 mkdir -p /var/run.bdguard-check

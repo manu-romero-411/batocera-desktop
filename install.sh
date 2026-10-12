@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # batocera-desktop installer / uninstaller
 #
-#   sudo ./install.sh --user YOUR_USER     install
+#   sudo ./install.sh --user YOUR_USER [--variant v3|x86_64|5.26-amd64|5.26-i386]   install
+#                                          (no --variant: asks, showing which ones fit this machine)
 #   sudo ./install.sh --uninstall          remove the software only (keeps config, image, userdata)
 #   sudo ./install.sh --purge [--yes]      remove EVERYTHING: software, config, Batocera image,
 #                                          userdata (roms, saves, bios!), logs, legacy scripts
@@ -15,6 +16,7 @@ DEST=/opt/batocera-desktop
 CONF=/etc/batocera-desktop.conf
 user=${SUDO_USER:-}
 user_explicit=0
+variant=""
 mode=install
 assume_yes=0
 ORIG_ARGS=("$@")
@@ -24,11 +26,12 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 while (($#)); do
     case $1 in
         --user)      user=${2:-}; user_explicit=1; shift 2 ;;
+        --variant)   variant=${2:-}; shift 2 ;;
         --uninstall) mode=uninstall; shift ;;
         --purge)     mode=purge; shift ;;
         --yes|-y)    assume_yes=1; shift ;;
-        -h|--help)   sed -n '2,10p' "$0"; exit 0 ;;
-        *) die "usage: $0 --user USER | --uninstall | --purge [--yes]" ;;
+        -h|--help)   sed -n '2,12p' "$0"; exit 0 ;;
+        *) die "usage: $0 --user USER [--variant V] | --uninstall | --purge [--yes]" ;;
     esac
 done
 [[ $EUID -eq 0 ]] || die "run with sudo"
@@ -135,6 +138,25 @@ fi
 [[ -n $user && $user != root ]] || die "pass --user YOUR_USER"
 [[ $user =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ ]] || die "invalid user name: '$user'"
 id "$user" >/dev/null
+# ---- which Batocera build? Decided and VALIDATED before anything is copied: a wrong one = error.
+# shellcheck source=lib/bd-variants.sh
+. "$SRC/lib/bd-variants.sh"
+bd_hw_probe
+if [[ -z $variant && -r $CONF ]]; then variant=$(sed -n 's/^BD_VARIANT=["'"'"']\?\([^"'"'"'#[:space:]]*\).*/\1/p' "$CONF" | tail -1); fi
+if [[ -z $variant ]]; then
+    [[ -t 0 ]] || die "no --variant given and no terminal to ask on. Valid: ${BD_VARIANTS[*]}. Run './install.sh --user $user --variant X' (see: batocera-desktop detect)"
+    echo "This machine:"; bd_hw_report; echo
+    echo "Which Batocera build do you want to use?"
+    i=1; for v in "${BD_VARIANTS[@]}"; do
+        if bd_variant_check "$v"; then m="OK "; else m="NO "; fi
+        printf '  %d) [%s] %s\n' "$i" "$m" "$(bd_variant_label "$v")"; ((i++))
+    done
+    read -r -p "Number (1-${#BD_VARIANTS[@]}): " ans
+    [[ $ans =~ ^[1-4]$ ]] || die "invalid choice"
+    variant=${BD_VARIANTS[ans-1]}
+fi
+bd_variant_check "$variant" || die "variant '$variant' cannot be installed on this machine: $BD_WHY. Recommended here: $(bd_variant_recommend)"
+echo "Variant: $variant ($(bd_variant_label "$variant"))"
 for c in unshare chroot flock sudo xz visudo python3; do command -v "$c" >/dev/null || die "missing command: $c"; done
 
 rm -rf "$DEST"; mkdir -p "$DEST"
@@ -171,6 +193,8 @@ if ((user_explicit)) || ! grep -q '^BD_USER=.' "$CONF"; then
     set_conf BD_USER "$user"
     echo "BD_USER=$user written to $CONF"
 fi
+set_conf BD_VARIANT "$variant"
+echo "BD_VARIANT=$variant written to $CONF"
 install -m 0644 "$SRC/share/desktop/batocera-desktop.desktop" /usr/share/applications/batocera-desktop.desktop
 install -m 0644 "$SRC/share/desktop/modules-load.conf" /etc/modules-load.d/batocera-desktop.conf
 install -D -m 0644 "$SRC/share/udev/99-batocera-hotkeygen.rules" /etc/udev/rules.d/99-batocera-hotkeygen.rules
@@ -188,7 +212,10 @@ install -m 0440 -o root -g root "$tmp" /etc/sudoers.d/batocera-desktop; rm -f "$
 [[ -d /batocera/chroot_scripts ]] && echo "NOTE: old scripts remain in /batocera/chroot_scripts (no longer used; 'batocera-desktop purge' removes them)."
 echo "Installed. Next steps:"
 echo "  1) review $CONF"
-echo "  2) batocera-desktop install --download   (if you have no x86-64-v3 image in the boot dir yet)"
+case $variant in
+    5.26-*) echo "  2) batocera-desktop install --variant $variant --img batocera-5.26-....img.gz   (or --file boot.tar.xz)" ;;
+    *)      echo "  2) batocera-desktop install --variant $variant --download   (if the boot dir has no image yet)" ;;
+esac
 echo "  3) batocera-desktop doctor"
 echo "  4) batocera-desktop start        (inside Wayland: fullscreen window; on a text console: full screen; Ctrl+C ends it)"
 echo "  5) optional service (drm on the first free console from tty8; audio from BD_USER=$(sed -n 's/^BD_USER=//p' "$CONF" | head -1)):"
