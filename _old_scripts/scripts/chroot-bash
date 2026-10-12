@@ -1,0 +1,7 @@
+#!/bin/bash
+
+rootdir=$(realpath $(dirname "$0"))
+. "$rootdir/env-vars"
+
+chroot "$BATO_MOUNT/chroot" /userdata/scripts/setenv
+exit $?

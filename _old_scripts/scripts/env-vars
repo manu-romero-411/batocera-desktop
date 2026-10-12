@@ -1,0 +1,9 @@
+#!/bin/bash
+
+#export MOUNT_POINT=/batoroot
+export DISPLAY_MANAGER=sddm
+export BATO_MOUNT=/bato_mount
+export BATO_INSTALL_DIR=/boot/batocera
+export BATO_USERDATA=/batocera
+export BATO_SYSTEM=/batocera/system
+export BATO_SCRIPTS=/batocera/chroot_scripts

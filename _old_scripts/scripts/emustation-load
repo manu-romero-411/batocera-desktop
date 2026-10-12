@@ -1,0 +1,42 @@
+#!/bin/bash
+
+rootdir=$(realpath $(dirname "$0"))
+. "$rootdir/env-vars"
+#set -e -o pipefail
+
+"$BATO_SCRIPTS/chroot-setup" -m || exit 1
+/usr/bin/systemctl stop "$DISPLAY_MANAGER" || exit 1
+chroot "$BATO_MOUNT/chroot/" /etc/init.d/S31emulationstation start
+chroot "$BATO_MOUNT/chroot/" /etc/init.d/S50triggerhappy start
+chroot "$BATO_MOUNT/chroot/" /etc/init.d/S99userservices start
+read < "$BATO_MOUNT/chroot/signal.fifo"
+chroot "$BATO_MOUNT/chroot/" /etc/init.d/S50triggerhappy stop
+chroot "$BATO_MOUNT/chroot/" /etc/init.d/S06audio stop
+chroot "$BATO_MOUNT/chroot/" /etc/init.d/S31emulationstation stop
+"$BATO_SCRIPTS/chroot-setup" -u
+
+GOTO=$(cat /tmp/.continue)
+
+case "$GOTO" in
+	shutdown)
+		systemctl poweroff
+		;;
+	poweroff)
+		systemctl poweroff
+		;;
+	reboot)
+		systemctl reboot
+		;;
+	debian)
+		sleep 1
+		systemctl start $DISPLAY_MANAGER
+		;;
+	android)
+		sleep 1
+		systemctl start $DISPLAY_MANAGER
+		;;
+	*)
+		echo "[INFO] No se especificó modo de salida de Batocera. Volviendo a consola virtual de Debian."
+esac
+rm /tmp/.continue
+exit $?

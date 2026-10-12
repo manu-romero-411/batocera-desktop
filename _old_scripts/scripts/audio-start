@@ -1,0 +1,16 @@
+#!/bin/bash
+
+/etc/init.d/S06audio restart
+prof=`batocera-audio list-profiles | grep "HDA Intel" | grep "Duplex" | head -1 | awk "{print \\$1}"`
+if [ ! "$prof" ]; then
+	continue
+fi
+echo "Selecting Profile $prof"
+batocera-audio set-profile "$prof"
+aud=`batocera-audio list | grep "HDA Intel" | grep "Duplex" | head -1 | awk "{print \\$1}"`
+if [ ! "$aud" ]; then
+	continue
+fi
+echo "Selecting Audio $aud"
+batocera-audio set "$aud"
+

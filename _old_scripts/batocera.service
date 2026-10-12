@@ -1,0 +1,8 @@
+[Unit]
+Description=Batocera chroot
+
+[Service]
+ExecStart=/batocera/scripts/emustation-load
+
+[Install]
+WantedBy=multi-user.target

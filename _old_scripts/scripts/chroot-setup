@@ -1,0 +1,202 @@
+#!/bin/bash
+
+# run as root if not
+if [ "$(whoami)" != root ]; then
+    sudo "$0"
+    exit 0
+fi
+
+# install tmux if not
+#if [ ! "$(which tmux)" ]; then
+#    apt-get install -y tmux
+#fi
+
+set -e -o pipefail
+rootdir=$(realpath $(dirname $0))
+. "$rootdir/env-vars"
+
+mount_if_not () {
+    if [ $# -lt 2 ]; then
+        echo "Usage: mount_if_not source target [options]"
+        exit 1
+    fi
+    if ! mountpoint -q "$2"; then
+        mkdir -p "$2"
+        if [ $(ls "$1"/ 2>/dev/null | wc -l) -ge 1 ]; then
+            mount --bind "$1" "$2"
+        else
+            mount "${@:3}" "$1" "$2"
+        fi
+    fi
+}
+
+function setup_chroot(){
+	# 1. mount Batocera /boot
+	mount_if_not "$BATO_INSTALL_DIR" "$BATO_MOUNT/boot"
+
+	# 2. mount Batocera root filesystem ($BATO_MOUNT/rootfs) as an overlay (upper:/bool/boot/overlay, lower:/bool$BATO_INSTALL_DIR)
+
+	# 2a. create an overlay on memory
+	mount_if_not tmpfs "$BATO_MOUNT/overlay_root" -t tmpfs -o size=256M
+	for d in base overlay work saved; do
+	    mkdir -p "$BATO_MOUNT/overlay_root/$d"
+	done
+
+	# 2b. copy out overlay files into upper
+	if test -s "$BATO_INSTALL_DIR/boot/overlay"; then
+	    mount_if_not "$BATO_INSTALL_DIR/boot/overlay" "$BATO_MOUNT/overlay_root/saved"
+	    cp -pr "$BATO_MOUNT/overlay_root/saved"/* "$BATO_MOUNT/overlay_root/overlay/"
+	    umount "$BATO_MOUNT/overlay_root/saved"
+	fi
+
+	# 2c. mount batocera squashfs onto lower
+	if [ $(ls "$MOUNT_POINT-squashfs/" 2>/dev/null | wc -l) -ge 5 ]; then
+	    mount_if_not "$MOUNT_POINT-squashfs" "$BATO_MOUNT/overlay_root/base"
+	else
+	    mount_if_not "$BATO_INSTALL_DIR/boot/batocera" "$BATO_MOUNT/overlay_root/base"
+	fi
+
+	# 2d. mount the overlay filesystem
+	mount_if_not overlay "$BATO_MOUNT/chroot" -t overlay -o rw,lowerdir="$BATO_MOUNT/overlay_root/base",upperdir="$BATO_MOUNT/overlay_root/overlay",workdir="$BATO_MOUNT/overlay_root/work"
+
+	# 3. mount Batocera data partition onto /userdata
+	mount_if_not "$BATO_USERDATA" "$BATO_MOUNT/chroot/userdata"
+	mount_if_not "$BATO_SYSTEM" "$BATO_MOUNT/chroot/userdata/system"
+	mount_if_not /pcgrande "$BATO_MOUNT/chroot/pcgrande"
+
+	# 4. bind batocera/boot and batocera/overlay folder
+	mount_if_not "$BATO_MOUNT/boot" "$BATO_MOUNT/chroot/boot" --bind
+	mount_if_not "$BATO_MOUNT/overlay_root" "$BATO_MOUNT/chroot/overlay" --bind
+
+	# 5. mount bind system runtime directories
+	for p in sys proc media dev "dev/pts" var tmp opt run "lib/modules"; do
+	    mount_if_not "/$p" "$BATO_MOUNT/chroot/$p" --bind
+	done
+
+	# Prepare network DNS nameserver config
+	rm -f "$BATO_MOUNT/chroot/etc/resolv.conf"
+	if [ "`grep ^nameserver /etc/resolv.conf`" ]; then
+	    cp "/etc/resolv.conf" "$BATO_MOUNT/chroot/etc/"
+	else
+	    echo "nameserver 1.1.1.1" > "$BATO_MOUNT/chroot/etc/resolv.conf"
+	fi
+
+	# Prepare shutdown/reboot signal for returning to Raspbian
+	if [ ! -p "$BATO_MOUNT/chroot/signal.fifo" ]; then
+	    rm -rf "$BATO_MOUNT/chroot/signal.fifo"
+	    mkfifo "$BATO_MOUNT/chroot/signal.fifo"
+	fi
+
+	for i in shutdown poweroff reboot debian android; do
+		[ -f "$BATO_MOUNT/chroot/sbin/$i" ] && rm "$BATO_MOUNT/chroot/sbin/$i"
+		echo "#/bin/bash" > "$BATO_MOUNT/chroot/sbin/$i"
+		echo "if echo \"\$@\" | grep r; then" >> "$BATO_MOUNT/chroot/sbin/$i"
+		echo -e "echo reboot>/tmp/.continue" >> "$BATO_MOUNT/chroot/sbin/$i"
+		echo "else" >> "$BATO_MOUNT/chroot/sbin/$i"
+		echo -e "echo $i>/tmp/.continue" >> "$BATO_MOUNT/chroot/sbin/$i"
+		echo "fi" >> "$BATO_MOUNT/chroot/sbin/$i"
+		echo -e "echo shutdown>/signal.fifo" >> "$BATO_MOUNT/chroot/sbin/$i"
+		chmod +x "$BATO_MOUNT/chroot/sbin/$i"
+	done
+}
+
+function unsetup_chroot(){
+	# Prepare shutdown/reboot signal for returning to Raspbian
+        rm -rf "$BATO_MOUNT/chroot/signal.fifo"
+
+	for i in shutdown poweroff reboot debian android; do
+		rm "$BATO_MOUNT/chroot/sbin/$i" || true
+	done
+
+	# Prepare network DNS nameserver config
+	rm -f "$BATO_MOUNT/chroot/etc/resolv.conf" || true
+
+	COUNT=0
+
+	while grep -q "$BATO_MOUNT/chroot" /proc/mounts; do
+		COUNT=$(($COUNT+1))
+		if [ $COUNT -ge 20 ]; then
+			>&2 echo "[ERROR] failed to umount $BATO_MOUNT/chroot"
+			if [ -x /usr/bin/lsof ]; then
+				/usr/bin/lsof "$BATO_MOUNT/chroot"
+			fi
+			exit 1
+		fi
+		grep "$BATO_MOUNT/chroot" /proc/mounts | \
+		cut -d\  -f2 | LANG=C sort -r | xargs -r -n 1 umount || sleep 1
+	done
+
+	# 2c. mount batocera squashfs onto lower
+	umount "$BATO_MOUNT/overlay_root/base" || true
+
+	# 2b. copy out overlay files into upper
+	umount "$BATO_MOUNT/overlay_root/saved" || true
+	umount "$BATO_MOUNT/overlay_root/overlay/" || true
+
+	# 2a. create an overlay on memory
+	for d in base overlay work saved; do
+	    rm -r "$BATO_MOUNT/overlay_root/$d" || true
+	done
+	umount "$BATO_MOUNT/overlay_root" || true
+
+	# 1. mount Batocera /boot
+	umount "$BATO_MOUNT/boot" || true
+}
+
+case "$1" in
+	"-m"|"--mount")
+		setup_chroot
+		;;
+	"-u"|"--umount")
+		unsetup_chroot
+		;;
+	*)
+		>&2 echo "[ERROR] Argumento inválido"
+		exit 1
+		;;
+esac
+exit 0
+#
+# # Switch into Batocera, run commands in tmux so as to survive logging out the current session
+# if [ ! "`tmux ls | grep switch_to_bato`" ]; then
+#     if [ ! -s /etc/rc.local ]; then
+#
+#         echo -e "#!/bin/sh -e\nexit 0" >/etc/rc.local
+#
+#         chmod +x /etc/rc.local
+#
+#     fi
+#     if [ ! "`grep switch_to_bato /etc/rc.local`" ]; then
+#
+#         sed -i "s:^exit:tmux new-session -s switch_to_bato -d -x 240 -y 60\nexit:g" /etc/rc.local
+#
+#         reboot
+#
+#     fi
+#     echo "tmux daemon has not started during boot, please reboot"
+#     exit 0
+# fi
+#
+# # Prepare Batocera start-and-select-audio script
+#echo '#!/bin/bash
+#for i in {1..3}; do
+#sleep 10
+#/etc/init.d/S06audio restart
+#prof=`batocera-audio list-profiles | grep "HDA Intel" | grep "Duplex" | head -1 | awk "{print \\$1}"`
+#if [ ! "$prof" ]; then
+#continue
+#fi
+#echo "Selecting Profile $prof"
+#batocera-audio set-profile "$prof"
+#aud=`batocera-audio list | grep "HDA Intel" | grep "Duplex" | head -1 | awk "{print \\$1}"`
+#if [ ! "$aud" ]; then
+#continue
+#fi
+#echo "Selecting Audio $aud"
+#batocera-audio set "$aud"
+#break
+#done
+#' >$BATO_MOUNT/chroot/start-audio.sh
+#
+# tmux send-keys -t switch_to_bato.0 -l "service $DISPLAY_MANAGER stop; chroot $BATO_MOUNT/chroot/ /etc/init.d/S31emulationstation start; chroot $BATO_MOUNT/chroot/ /start-audio.sh; read <$BATO_MOUNT/chroot/signal.fifo ; chroot $BATO_MOUNT/chroot/ /etc/init.d/S31emulationstation stop ; chroot $BATO_MOUNT/chroot/ /etc/init.d/S06audio stop ; service $DISPLAY_MANAGER start"
+# tmux send-keys Enter

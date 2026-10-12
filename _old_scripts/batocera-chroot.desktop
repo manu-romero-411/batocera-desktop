@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Retrobox Mini - Batocera
+Comment=
+Exec=nohup /home/manuel/.local/bin/batocera-chroot
+Icon=applications-games
+Path=
+Terminal=false
+StartupNotify=false
+Categories=Game;
