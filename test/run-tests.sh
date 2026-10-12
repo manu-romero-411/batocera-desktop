@@ -228,6 +228,20 @@ t "a second session is refused (lock)" "! ( unset BD_WAYLAND; BD_MODE=nested BD_
 kill -INT $RUNPID $(pgrep -f '^bash .*/libexec/bd-session inner$') 2>/dev/null
 t "Ctrl+C (SIGINT) ends it" "waitfor '! alive $RUNPID'"
 t "no leftover mounts" "! grep -q bdtest /proc/mounts"
+# drm launch on a console that is not the caller's: only if nobody uses it (then the session claims it)
+t "rejects a console in use by someone else" "( exec 3</dev/tty62; ! L --mode drm --tty /dev/tty62 --xdg /run/user/1000 )"
+claim_launch(){ rm -f $T/userdata/system/stock-launch-ran
+  ( SUDO_UID=1000 python3 -c 'import signal,sys,os;signal.signal(signal.SIGINT,signal.SIG_DFL);os.execv(sys.argv[1],sys.argv[1:])' "$PFX/libexec/bd-session" launch --mode drm --tty /dev/tty63 --xdg /run/user/1000 >"$T/logs/claim.log" 2>&1 & echo $! > $T/runpid )
+  RUNPID=$(cat $T/runpid); }
+claim_launch
+t "free console: launch claims it and starts a drm session" "waitfor '[ -e $T/userdata/system/stock-launch-ran ]' && grep -q 'claiming the free console tty63' $T/logs/claim.log"
+kill -TERM $RUNPID $(pgrep -f '^bash .*/libexec/bd-session inner$') 2>/dev/null
+t "claimed console: session ends on SIGTERM, nothing left mounted" "waitfor '! alive $RUNPID' && ! grep -q bdtest /proc/mounts"
+chown 1000 /dev/tty63
+claim_launch
+t "the caller's own console is used as is (not claimed)" "waitfor '[ -e $T/userdata/system/stock-launch-ran ]' && ! grep -q claiming $T/logs/claim.log"
+kill -TERM $RUNPID $(pgrep -f '^bash .*/libexec/bd-session inner$') 2>/dev/null
+waitfor '! alive $RUNPID'; chown root /dev/tty63
 rm -f /run/user/1000/wayland-0; rmdir /run/user/1000 2>/dev/null
 
 section "Test 8: service start (no BD_MODE): drm on the first free VT"
@@ -306,7 +320,13 @@ t "console + X11 build + Wayland desktop elsewhere -> drm" "cli x86_64 /dev/tty4
 t "plain console, nothing else -> drm" "cli v3 /dev/tty3 '' '' | grep -q -- '--mode drm --tty /dev/tty3'"
 t "terminal (no tty) inside Wayland -> nested" "cli v3 '' wayland-0 '' | grep -q -- '--mode nested'"
 t "terminal (no tty) inside X11 -> refused" "[ -z \"\$(cli v3 '' '' :0)\" ]"
-t "explicit --mode nested from a console still nests" "cli v3 /dev/tty3 wayland-0 '' --mode nested | grep -q -- '--mode nested'"
+t "--tty 8 from a terminal inside Wayland -> drm on tty8" "cli v3 '' wayland-0 '' --tty 8 | grep -q -- '--mode drm --tty /dev/tty8'"
+t "--tty 8 over ssh (no desktop at all) -> drm on tty8" "cli v3 '' '' '' --tty 8 | grep -q -- '--mode drm --tty /dev/tty8'"
+t "--tty 8 with an X11 build -> drm on tty8" "cli x86_64 '' '' '' --tty 8 | grep -q -- '--mode drm --tty /dev/tty8'"
+t "--tty wins over the shell's own console" "cli v3 /dev/tty3 '' '' --tty 8 | grep -q -- '--tty /dev/tty8'"
+t "--tty rejects non-numbers" "[ -z \"\$(cli v3 '' '' '' --tty ../x)\" ] && [ -z \"\$(cli v3 '' '' '' --tty 0)\" ]"
+t "X11 build without a console nor --tty -> refused" "[ -z \"\$(cli x86_64 '' wayland-0 '')\" ]"
+t "--mode is gone (redundant with --tty)" "[ -z \"\$(cli v3 /dev/tty3 '' '' --mode drm)\" ]"
 
 echo
 summary "Result"

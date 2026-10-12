@@ -5,6 +5,7 @@
 #   launch   (via sudo, passwordless)  validate the caller's parameters, then exec `run`
 #   run      the session loop (restarts after ES "reboot"). Two ways to get here:
 #              * launch  -> manual start, foreground, Ctrl+C ends it; mode nested or drm
+#                           (drm: the caller's own console, or a free one claimed with --tty)
 #              * the systemd unit -> service start: drm on the first free VT >= BD_TTY_MIN (default 8)
 #   inner    PID 1 of the namespace: mount layers, start services, wait, clean up
 #   shell|enter [-- cmd]   Batocera environment without starting services (maintenance)
@@ -20,6 +21,7 @@ BD_STOP=0
 BD_ACTION="exit"
 BD_RC=0
 BD_HOST_DOWN=0
+BD_OWNVT=0
 BD_ENV=()
 BD_UNSHARE=()
 DISPLAY=:1
@@ -36,7 +38,7 @@ bd_unshare_args() {
 # ============================================================ launch (sudo)
 cmd_launch() {
     need_root
-    local uid=${SUDO_UID:-} wl="" xdg="" xl="" xv="" mode="" tty="" fs=0
+    local uid=${SUDO_UID:-} wl="" xdg="" xl="" xv="" mode="" tty="" fs=0 claim=0 n
     [[ -n $uid && $uid != 0 ]] || die "run it as your desktop user (through sudo), not as root"
     while (($#)); do
         case $1 in
@@ -81,16 +83,22 @@ cmd_launch() {
         tty=""
         ;;
     drm)
-        # passwordless sudo: the VT must be a real console owned by the caller
+        # passwordless sudo: the VT must be a real console, either the caller's own (they are logged
+        # in on it) or one nobody uses (ssh / `start --tty N`): then the session claims it.
         [[ $tty =~ ^/dev/tty[1-9][0-9]*$ && -c $tty ]] || die "invalid tty: '$tty'"
-        [[ $(stat -c %u "$tty") == "$uid" ]] || die "$tty does not belong to your user"
+        if [[ $(stat -c %u "$tty") != "$uid" ]]; then
+            n=${tty#/dev/tty}
+            [[ $(bd_free_vt "$n" 2>/dev/null) == "$n" ]] ||
+                die "$tty is in use by someone else (tty$(bd_free_vt 8 2>/dev/null || echo '?') is free now)"
+            claim=1
+        fi
         wl=""
         ;;
     *) die "unknown mode: '$mode' (nested|drm)" ;;
     esac
     [[ $xl =~ ^[A-Za-z0-9_,-]*$ && $xv =~ ^[A-Za-z0-9_,-]*$ ]] || die "invalid keyboard layout"
     exec env BD_MODE="$mode" BD_TTY="$tty" BD_UID="$uid" BD_WAYLAND="$wl" BD_XDG="$xdg" \
-        BD_XKB_LAYOUT_HOST="$xl" BD_XKB_VARIANT_HOST="$xv" BD_FS="$fs" \
+        BD_XKB_LAYOUT_HOST="$xl" BD_XKB_VARIANT_HOST="$xv" BD_FS="$fs" BD_CLAIM_VT="$claim" \
         "$BD_PREFIX/libexec/bd-session" run
 }
 
@@ -132,6 +140,7 @@ bd_resolve_session() {
             log_warn "drm mode needs a /dev/ttyN"
             return 1
         }
+        [[ ${BD_CLAIM_VT:-0} == 1 ]] && log_info "claiming the free console ${BD_TTY#/dev/}: switching to it, and back when Batocera ends"
         # audio comes from the user's PipeWire: make sure it exists (service start, no login)
         if [[ $BD_AUDIO == host ]]; then
             if [[ -n ${BD_XDG:-} && -d $BD_XDG ]]; then
@@ -189,6 +198,10 @@ cmd_run() {
     rm -f "$BD_ACTION_FILE"
     BD_SERVICE=0
     bd_resolve_session || exit 1
+    # a console nobody is logged in on (the service's, or one claimed with `start --tty N`) is ours to
+    # manage: no login prompt on it meanwhile, and the previous VT comes back at the end
+    BD_OWNVT=0
+    if ((BD_SERVICE)) || [[ ${BD_CLAIM_VT:-0} == 1 ]]; then BD_OWNVT=1; fi
     bd_unshare_args --kill-child=SIGTERM
     local act active prev_vt=""
     BD_RUN_STOP=0
@@ -203,8 +216,8 @@ cmd_run() {
             prev_vt=$active
             python3 "$BD_PREFIX/libexec/bd-vt" activate "${BD_TTY#/dev/tty}" || log_warn "could not switch to ${BD_TTY##*/}"
         fi
-        # service start: keep logind from spawning a login prompt on our VT while we own it
-        ((BD_SERVICE)) && bd_reserve_vt "${BD_TTY#/dev/tty}"
+        # keep logind from spawning a login prompt on our VT while we own it
+        ((BD_OWNVT)) && bd_reserve_vt "${BD_TTY#/dev/tty}"
     fi
     while :; do
         bd_boot_apply_pending
@@ -235,7 +248,7 @@ cmd_run() {
         esac
     done
     # host going down: leave the console as it is (no login prompt / VT flash while it shuts down)
-    if ((BD_SERVICE && !BD_HOST_DOWN)); then
+    if ((BD_OWNVT && !BD_HOST_DOWN)); then
         bd_release_vt "${BD_TTY#/dev/tty}"
         # give the screen back: return to the VT we came from
         [[ -n $prev_vt ]] && python3 "$BD_PREFIX/libexec/bd-vt" activate "$prev_vt" 2>/dev/null

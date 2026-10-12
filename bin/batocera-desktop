@@ -14,13 +14,17 @@ usage() {
 cat <<USG
 Usage: batocera-desktop <command>
 
-  start [--mode auto|nested|drm] [--windowed]
+  start [--tty N] [--windowed]
         Run Batocera now, in this terminal. Ctrl+C (or ES "Shutdown") ends it.
-          * on a text console (/dev/ttyN)       -> drm: full screen on that very console, owns the
-                                                   displays (even if a Wayland/X11 desktop runs on another VT)
-          * in a terminal inside a Wayland session -> nested: a fullscreen window of your desktop
-                                                   (Alt+Tab back to the desktop)
-        --windowed     nested: do not ask the host compositor for fullscreen
+          * on a text console (/dev/ttyN)          -> full screen on that very console (drm): Batocera
+                                                      owns the displays, even if a Wayland/X11 desktop
+                                                      runs on another VT
+          * in a terminal inside a Wayland session -> a fullscreen window of your desktop (nested;
+                                                      Alt+Tab back to the desktop)
+        --tty N        full screen (drm) on console N, from wherever you are (ssh, a terminal in your
+                       desktop). N is either the console you are logged in on, or a free one: Batocera
+                       switches to it and back to where you were when it ends.
+        --windowed     nested only: do not ask the host compositor for fullscreen
   detect           What this machine is and which Batocera variants it may install (no sudo)
   doctor           Full diagnostics (asks for sudo)
   shell [cmd...]   Root shell inside the Batocera environment (asks for sudo)
@@ -113,47 +117,38 @@ case $cmd in
     start)
         [[ $EUID -ne 0 ]] || die "run it as your user, not as root"
         XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
-        mode=auto; fsopt=$(conf_val BD_FULLSCREEN); fsopt=${fsopt:-auto}
+        fsopt=$(conf_val BD_FULLSCREEN); fsopt=${fsopt:-auto}; opt_tty=""
         while (($#)); do
             case $1 in
                 --windowed) fsopt=0; shift ;;
-                --mode) mode=${2:-}; shift 2 ;;
+                --tty) opt_tty=${2:-}; shift 2 ;;
                 *) usage; exit 1 ;;
             esac
         done
-        case $mode in auto|nested|drm) ;; *) die "--mode must be auto, nested or drm" ;; esac
-        tty=$(cur_tty || true)
+        if [[ -n $opt_tty ]]; then
+            [[ $opt_tty =~ ^[1-9][0-9]*$ ]] || die "--tty needs a console number (e.g. --tty 8), not '$opt_tty'"
+            tty=/dev/tty$opt_tty
+        else
+            tty=$(cur_tty || true)
+        fi
         wl=$(find_wayland || true)
         variant=$(conf_val BD_VARIANT); variant=${variant:-v3}
         # only the Wayland (v3) build can be nested; the X11 builds run standalone on a console
         nested_ok=0; [[ $variant == v3 ]] && nested_ok=1
-        if ((!nested_ok)); then
-            if [[ $mode == nested ]]; then
-                die "variant $variant is an X11 build: nested mode is not available (use a text console, Ctrl+Alt+F3, or: sudo systemctl start batocera-desktop)"
-            fi
-            if [[ $mode == auto ]]; then
-                [[ -n $tty ]] || die "variant $variant runs full screen on its own console (run this from a text console, Ctrl+Alt+F3, or use: sudo systemctl start batocera-desktop)"
-                mode=drm
-            fi
-        fi
-        if [[ $mode == auto ]]; then
-            # A real console (/dev/ttyN) always runs full screen on that very VT (drm), whatever desktop,
-            # Wayland or X11, the user has on another VT: its socket (found in the shared runtime dir) or a
-            # stale DISPLAY is not something to nest into. Nesting is for a terminal emulator (a pty)
-            # inside a Wayland session; X11 is not supported.
-            if [[ -n $tty ]]; then mode=drm
-            elif [[ -n $wl ]]; then mode=nested
-            elif [[ -n ${DISPLAY:-} ]]; then
-                die "X11 sessions are not supported (use a Wayland session, or run this from a text console, Ctrl+Alt+F3)"
-            else
-                die "not in a Wayland session nor on a text console (for an unattended start use: sudo systemctl start batocera-desktop)"
-            fi
-        fi
-        if [[ $mode == drm ]]; then
-            [[ -n $tty ]] || die "drm mode must be started from a /dev/ttyN console (Ctrl+Alt+F3, log in)"
+        # A console (the shell's own /dev/ttyN, or --tty N) always runs full screen on that VT (drm),
+        # whatever desktop, Wayland or X11, the user has on another VT: its socket (found in the shared
+        # runtime dir) or a stale DISPLAY is not something to nest into. Nesting is for a terminal
+        # emulator (a pty) inside a Wayland session; X11 is not supported.
+        if [[ -n $tty ]]; then
             exec sudo -- "$SESSION" launch --mode drm --tty "$tty" --xdg "$XDG_RUNTIME_DIR"
+        elif ((!nested_ok)); then
+            die "variant $variant runs full screen on its own console: run this from a text console (Ctrl+Alt+F3), with --tty N, or use: sudo systemctl start batocera-desktop"
+        elif [[ -z $wl ]]; then
+            if [[ -n ${DISPLAY:-} ]]; then
+                die "X11 sessions are not supported (use a Wayland session, or run this from a text console, Ctrl+Alt+F3, or use --tty N)"
+            fi
+            die "not in a Wayland session nor on a text console (use --tty N, or for an unattended start: sudo systemctl start batocera-desktop)"
         fi
-        [[ -n $wl ]] || die "no Wayland session found (are you on X11? from a console use --mode drm)"
         args=(--mode nested --xdg "$XDG_RUNTIME_DIR" --wayland "$wl")
         { read -r kl; read -r kv; } < <(xkb)
         args+=(--xkb-layout "$kl" --xkb-variant "$kv")

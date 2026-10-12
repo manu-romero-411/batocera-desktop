@@ -46,7 +46,7 @@ The `batocera-desktop` command does **setup and manual start only**. Running Bat
 
 | Command | |
 |---|---|
-| `start [--mode auto\|nested\|drm] [--windowed]` | run Batocera now, in this terminal; **Ctrl+C ends it** |
+| `start [--tty N] [--windowed]` | run Batocera now, in this terminal; **Ctrl+C ends it** |
 | `doctor` | host + image + GPU + service diagnostics |
 | `shell [cmd]` | root shell inside the Batocera environment |
 | `update` | stock `batocera-upgrade` inside; applied the next time Batocera starts (or "Restart" in ES) |
@@ -56,10 +56,16 @@ The `batocera-desktop` command does **setup and manual start only**. Running Bat
 Inside ES: **Shutdown** closes Batocera and returns to where you started it; **Restart** restarts the session (applies updates). With `BD_CAN_SHUTDOWN=true` both act on the **host** instead (see [Shutdown and reboot](#shutdown-and-reboot-bd_can_shutdown)). Closing the nested window also ends the session. Logs: Batocera's in `<userdata>/system/logs/`, services' in `/var/log/batocera-desktop/`.
 
 ### Manual start (`batocera-desktop start`)
-It runs in the foreground of your terminal; there is nothing to stop or restart: Ctrl+C (or "Shutdown" in ES) closes it and cleans up. The mode comes from where you run it:
+It runs in the foreground of your terminal; there is nothing to stop or restart: Ctrl+C (or "Shutdown" in ES) closes it and cleans up. The mode comes from where you run it (no option needed):
 * **Text console** (Ctrl+Alt+F3, log in; the shell's tty is a real `/dev/ttyN`) → *drm*: full screen on **that very VT**, **regardless of any desktop (Wayland or X11) the same user has running on another VT** (its Wayland socket or `DISPLAY` is ignored: it is never nested into). In drm mode Batocera owns that VT's keyboard, so Ctrl+C does not reach your shell: use ES "Shutdown", or from another VT/ssh run `sudo pkill -INT -f 'bd-session run'`.
 * **Terminal emulator inside a Wayland session** → *nested*: the CLI asks your compositor to make the window fullscreen (KDE via a KWin script, sway, Hyprland; elsewhere use the compositor's own fullscreen shortcut) and removes that rule when Batocera ends. `--windowed` or `BD_FULLSCREEN=0` disables it.
-* **Terminal inside an X11 session**: refused (not supported). `--mode` forces one of the two.
+* **Terminal inside an X11 session**: refused (not supported).
+* **X11 variants** (`x86_64`, `5.26-*`) have no nested mode: they need a console (or `--tty N`).
+
+**`--tty N`** is the way to get full screen (drm) on a console **other than the one you are typing in**: over ssh, or from a terminal inside your desktop (where the automatic choice would be a nested window). It overrides the automatic choice, whatever the variant. `N` is either the console you are logged in on, or a **free** one (no login session, nothing holding it open; `tty8` and up are normally free, tty1-6 only if no getty is waiting there). On a free console Batocera does what the service does: it switches to it, keeps logind from drawing a login prompt on it meanwhile and, when it ends (Ctrl+C in the ssh terminal, ES "Shutdown"), switches back to the VT you were on. A console someone else uses is refused with an error naming a free one. The systemd service is unaffected: it always takes the first free console from `BD_TTY_MIN`.
+```bash
+batocera-desktop start --tty 8      # e.g. over ssh: Batocera appears on tty8 of the machine
+```
 
 ### The systemd service
 `install.sh` installs `batocera-desktop.service`. It is **drm only** and never windowed: it takes the **first free console from tty8 up** (tty1-6 are text consoles and tty7 is usually X11/lightdm; no logind session on it, nothing holding it open; `BD_TTY_MIN` changes the start), switches to it, and switches back to the previous VT when Batocera ends. Use plain systemd:
@@ -103,7 +109,7 @@ batocera-desktop purge          # EVERYTHING
 `purge` removes: the program, the systemd unit, sudoers rule, menu entry, `/etc/batocera-desktop.conf`, the Batocera image directory (`BD_BOOT_DIR`), **your userdata (`BD_USERDATA`: roms, BIOS, saves, `batocera.conf`)**, logs, and the legacy `batocera-chroot` leftovers. It lists what it will delete with sizes and requires typing `DELETE` (or `--yes`). Safeguards: it refuses system directories (`/`, `/etc`, `/usr`, `/var`, `/home`, …), home directories, mount points, anything with active mounts below it (stop the session first), and identical boot/userdata paths. It works from the config's paths, so back up first if your roms live there. The same works from the source tree: `sudo ./uninstall.sh [--purge]`.
 
 ## Tests
-`test/test-variants.sh` (no root): the eligibility matrix against simulated CPUs/GPUs. `sudo test/test-x11.sh`: install/start guards and the Xorg shim. `sudo test/run-tests.sh` (root, `mksquashfs`, `busybox-static`): 77 checks with a fake Batocera. `sudo test/test-install.sh`: installer/uninstaller/purge (touches `/opt`, `/etc`, `/usr/local`: use a VM or container). If something fails on your machine: `batocera-desktop doctor`, `<userdata>/system/logs/display.log` and `batocera-desktop shell cat /var/log/labwc.log` while it runs. On Intel test with `BD_GPU=mesa` (or simply no nvidia module: auto).
+`test/test-variants.sh` (no root): the eligibility matrix against simulated CPUs/GPUs. `sudo test/test-x11.sh`: install/start guards and the Xorg shim. `sudo test/run-tests.sh` (root, `mksquashfs`, `busybox-static`): 87 checks with a fake Batocera. `sudo test/test-install.sh`: installer/uninstaller/purge (touches `/opt`, `/etc`, `/usr/local`: use a VM or container). If something fails on your machine: `batocera-desktop doctor`, `<userdata>/system/logs/display.log` and `batocera-desktop shell cat /var/log/labwc.log` while it runs. On Intel test with `BD_GPU=mesa` (or simply no nvidia module: auto).
 
 ## Known limits
 X11 variants are tty/standalone only (no nested window); the X11 and 5.26 paths are only unit-tested, never run against a real image (see ANALYSIS §8); unmeasured nested latency; the NVIDIA/audio/Bluetooth/systemd-service paths are untested on real hardware; Batocera's services run as root (keep `BD_USERDATA` root-owned, since `start` uses passwordless sudo). Full list: [`docs/ANALYSIS.md`](docs/ANALYSIS.md#7-known-risks-and-limits).
