@@ -45,7 +45,13 @@ bd_load_config() {
     : "${BD_SERVICES:=$P_SERVICES}"
     : "${BD_URL_526_AMD64:=}"               # download URLs for the 5.26 builds (a boot.tar.xz); empty = use --file/--img
     : "${BD_URL_526_I386:=}"
-    : "${BD_ON_SHUTDOWN:=exit}"             # exit | host  (what "Shutdown" does in ES)
+    # BD_CAN_SHUTDOWN: true = "Shutdown"/"Restart" inside Batocera power off / reboot the HOST;
+    # false = they only end / restart the Batocera session.
+    case ${BD_CAN_SHUTDOWN:-false} in
+        true|1|yes) BD_CAN_SHUTDOWN=true ;;
+        false|0|no) BD_CAN_SHUTDOWN=false ;;
+        *) die "invalid BD_CAN_SHUTDOWN '$BD_CAN_SHUTDOWN' in $BD_CONF (valid: true, false)" ;;
+    esac
     : "${BD_PIDNS:=1}"
     : "${BD_WLR_RENDERER:=gles2}"
     : "${BD_LABWC_DEBUG:=1}"

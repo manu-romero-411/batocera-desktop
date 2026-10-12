@@ -256,5 +256,37 @@ if [ -c /dev/tty4 ]; then
   t "VT held open by a process is skipped" "[ \"\$( (exec 3</dev/tty5; bash -c \". '$PFX/lib/bd-common.sh'; bd_free_vt 5\") )\" != 5 ]"
 else log_warn "skipped: no /dev/tty4 in this environment"; fi
 
+section "Test 10: BD_CAN_SHUTDOWN (shutdown/reboot inside Batocera reach the host)"
+mkdir -p $T/fakebin
+cat > $T/fakebin/systemctl <<X
+#!/bin/sh
+echo "\$*" >> $T/logs/systemctl.log
+X
+chmod +x $T/fakebin/systemctl
+cs_run(){ # cs_run VALUE ACTION : start a session with BD_CAN_SHUTDOWN=VALUE, run ACTION inside, wait for the end
+  { cat $T/bd.conf; echo "BD_CAN_SHUTDOWN=$1"; } > $T/bd-cs.conf
+  rm -f $T/logs/systemctl.log $T/userdata/system/labwc.env
+  BD_CONF=$T/bd-cs.conf PATH=$T/fakebin:$PATH start_session
+  waitfor "[ -s $T/userdata/system/labwc.env ]"
+  inns chroot /run/bdtest/root /sbin/$2
+}
+cs_run true poweroff
+t "true: poweroff inside -> host 'systemctl poweroff'" "waitfor 'grep -qx poweroff $T/logs/systemctl.log' 2>/dev/null"
+t "true: session ended (no restart)" "waitfor '! alive $RUNPID'"
+wait $RUNPID 2>/dev/null
+cs_run true reboot
+t "true: reboot inside -> host 'systemctl reboot'" "waitfor 'grep -qx reboot $T/logs/systemctl.log' 2>/dev/null"
+t "true: session ended instead of restarting" "waitfor '! alive $RUNPID'"
+wait $RUNPID 2>/dev/null
+cs_run false poweroff
+t "false: poweroff ends only the session" "waitfor '! alive $RUNPID' && [ ! -e $T/logs/systemctl.log ]"
+wait $RUNPID 2>/dev/null
+cs_run false reboot
+t "false: reboot restarts the session, host untouched" "rm -f $T/userdata/system/labwc.env; waitfor '[ -s $T/userdata/system/labwc.env ]' && alive $RUNPID && [ ! -e $T/logs/systemctl.log ]"
+kill -TERM $RUNPID $(pgrep -f '^bash .*/libexec/bd-session inner$') 2>/dev/null
+waitfor '! alive $RUNPID'; wait $RUNPID 2>/dev/null
+echo "BD_CAN_SHUTDOWN=maybe" >> $T/bd-cs.conf
+t "invalid BD_CAN_SHUTDOWN is rejected" "! BD_CONF=$T/bd-cs.conf '$PFX/libexec/bd-session' run >/dev/null 2>&1"
+
 echo
 summary "Result"

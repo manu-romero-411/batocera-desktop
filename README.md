@@ -53,7 +53,7 @@ The `batocera-desktop` command does **setup and manual start only**. Running Bat
 | `install [--download\|--file F]` | install/reinstall the Batocera image |
 | `uninstall` / `purge` | remove the software / remove everything |
 
-Inside ES: **Shutdown** closes Batocera and returns to where you started it (`BD_ON_SHUTDOWN=host` powers the PC off); **Restart** restarts the session (applies updates). Closing the nested window also ends the session. Logs: Batocera's in `<userdata>/system/logs/`, services' in `/var/log/batocera-desktop/`.
+Inside ES: **Shutdown** closes Batocera and returns to where you started it; **Restart** restarts the session (applies updates). With `BD_CAN_SHUTDOWN=true` both act on the **host** instead (see [Shutdown and reboot](#shutdown-and-reboot-bd_can_shutdown)). Closing the nested window also ends the session. Logs: Batocera's in `<userdata>/system/logs/`, services' in `/var/log/batocera-desktop/`.
 
 ### Manual start (`batocera-desktop start`)
 It runs in the foreground of your terminal; there is nothing to stop or restart: Ctrl+C (or "Shutdown" in ES) closes it and cleans up. The mode comes from where you run it:
@@ -66,10 +66,22 @@ It runs in the foreground of your terminal; there is nothing to stop or restart:
 ```bash
 sudo systemctl start batocera-desktop      # Batocera appears on the first free console
 sudo systemctl stop batocera-desktop       # clean shutdown
-sudo systemctl enable batocera-desktop     # also at boot (graphical.target)
+sudo systemctl enable batocera-desktop     # also at boot (multi-user.target: no desktop needed)
 sudo chvt 1                                # go back to your desktop; chvt N returns to Batocera
 ```
 Audio comes from the PipeWire of `BD_USER` (config; by default the logged-in regular user, else uid 1000), started on demand when nobody is logged in. If audio is missing, `journalctl -u batocera-desktop` says why (`NO audio` warnings) and `batocera-desktop doctor` shows the user and socket. While the service owns a VT it runtime-masks `getty@ttyN` so logind does not draw a login prompt over it. To use Batocera *instead of* your display manager, disable the display manager yourself (`systemctl disable sddm`) and enable this service; the service itself does not touch other units.
+
+## Shutdown and reboot (`BD_CAN_SHUTDOWN`)
+`BD_CAN_SHUTDOWN=false|true` in `/etc/batocera-desktop.conf` (default `false`) decides what the power commands run **inside** Batocera do. They are replaced by a shim that only signals the session; the session then acts according to this setting:
+
+| Inside Batocera | `false` (default) | `true` |
+|---|---|---|
+| `shutdown` / `poweroff` / `halt` (ES menu, power key, SSH, scripts) | closes Batocera, back to the desktop / shell | `systemctl poweroff` on the **host** |
+| `reboot` / `shutdown -r` | restarts the Batocera session (applies pending updates) | `systemctl reboot` on the **host** |
+
+`true` is meant for setups where Batocera is the **front end of a server without a UI of its own** (typically Debian): enable the service (`systemctl enable batocera-desktop`; the unit is wanted by `multi-user.target`, so it starts at boot with no desktop or display manager) and the machine can be powered off or rebooted from Batocera's own menu. After a host reboot the service starts Batocera again and applies any pending update, exactly like "Restart" does with `false`. While the host goes down the console is left as it is (no login prompt flashes over it). If `systemctl` fails, the error is logged and Batocera just ends (nothing is forced). Accepted values: `true`/`false` (also `1`/`0`); anything else is a configuration error.
+
+> Mind the nested mode: with `true`, "Shutdown" in a Batocera window started on your desktop powers off the whole machine, not just the window.
 
 ## Audio and volume keys
 * Batocera has no PipeWire of its own here: its `batocera-audio`/`pactl` talk to your session's PipeWire. Changing the volume, mute, output device or card profile **in Batocera changes it on the host**, and vice versa.
@@ -91,7 +103,7 @@ batocera-desktop purge          # EVERYTHING
 `purge` removes: the program, the systemd unit, sudoers rule, menu entry, `/etc/batocera-desktop.conf`, the Batocera image directory (`BD_BOOT_DIR`), **your userdata (`BD_USERDATA`: roms, BIOS, saves, `batocera.conf`)**, logs, and the legacy `batocera-chroot` leftovers. It lists what it will delete with sizes and requires typing `DELETE` (or `--yes`). Safeguards: it refuses system directories (`/`, `/etc`, `/usr`, `/var`, `/home`, …), home directories, mount points, anything with active mounts below it (stop the session first), and identical boot/userdata paths. It works from the config's paths, so back up first if your roms live there. The same works from the source tree: `sudo ./uninstall.sh [--purge]`.
 
 ## Tests
-`test/test-variants.sh` (no root): the eligibility matrix against simulated CPUs/GPUs. `sudo test/test-x11.sh`: install/start guards and the Xorg shim. `sudo test/run-tests.sh` (root, `mksquashfs`, `busybox-static`): 63 checks with a fake Batocera. `sudo test/test-install.sh`: installer/uninstaller/purge (touches `/opt`, `/etc`, `/usr/local`: use a VM or container). If something fails on your machine: `batocera-desktop doctor`, `<userdata>/system/logs/display.log` and `batocera-desktop shell cat /var/log/labwc.log` while it runs. On Intel test with `BD_GPU=mesa` (or simply no nvidia module: auto).
+`test/test-variants.sh` (no root): the eligibility matrix against simulated CPUs/GPUs. `sudo test/test-x11.sh`: install/start guards and the Xorg shim. `sudo test/run-tests.sh` (root, `mksquashfs`, `busybox-static`): 70 checks with a fake Batocera. `sudo test/test-install.sh`: installer/uninstaller/purge (touches `/opt`, `/etc`, `/usr/local`: use a VM or container). If something fails on your machine: `batocera-desktop doctor`, `<userdata>/system/logs/display.log` and `batocera-desktop shell cat /var/log/labwc.log` while it runs. On Intel test with `BD_GPU=mesa` (or simply no nvidia module: auto).
 
 ## Known limits
 X11 variants are tty/standalone only (no nested window); the X11 and 5.26 paths are only unit-tested, never run against a real image (see ANALYSIS §8); unmeasured nested latency; the NVIDIA/audio/Bluetooth/systemd-service paths are untested on real hardware; Batocera's services run as root (keep `BD_USERDATA` root-owned, since `start` uses passwordless sudo). Full list: [`docs/ANALYSIS.md`](docs/ANALYSIS.md#7-known-risks-and-limits).

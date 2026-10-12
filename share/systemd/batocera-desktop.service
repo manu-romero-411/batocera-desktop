@@ -14,4 +14,4 @@ TimeoutStopSec=60
 Restart=no
 
 [Install]
-WantedBy=graphical.target
+WantedBy=multi-user.target

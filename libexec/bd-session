@@ -19,6 +19,7 @@ SVC_STARTED=()
 BD_STOP=0
 BD_ACTION="exit"
 BD_RC=0
+BD_HOST_DOWN=0
 BD_ENV=()
 BD_UNSHARE=()
 DISPLAY=:1
@@ -221,15 +222,20 @@ cmd_run() {
             log_info "restarting the Batocera session"
             continue
             ;;
-        poweroff-host)
-            log_info "powering off the machine"
-            systemctl poweroff
+        poweroff-host | reboot-host)
+            log_info "BD_CAN_SHUTDOWN: ${act%-host} requested inside Batocera -> ${act%-host} the host"
+            if systemctl "${act%-host}"; then
+                BD_HOST_DOWN=1
+            else
+                log_err "systemctl ${act%-host} failed: the host stays up, ending the Batocera session instead"
+            fi
             break
             ;;
         *) break ;;
         esac
     done
-    if ((BD_SERVICE)); then
+    # host going down: leave the console as it is (no login prompt / VT flash while it shuts down)
+    if ((BD_SERVICE && !BD_HOST_DOWN)); then
         bd_release_vt "${BD_TTY#/dev/tty}"
         # give the screen back: return to the VT we came from
         [[ -n $prev_vt ]] && python3 "$BD_PREFIX/libexec/bd-vt" activate "$prev_vt" 2>/dev/null
@@ -242,8 +248,8 @@ bd_on_usr1() { # sent by the shutdown/reboot shims inside the chroot
     local a
     a=$(cat "$BD_ROOT/run/bd-action" 2>/dev/null)
     case $a in
-    reboot) BD_ACTION=reboot ;;
-    poweroff) if [[ $BD_ON_SHUTDOWN == host ]]; then BD_ACTION=poweroff-host; else BD_ACTION="exit"; fi ;;
+    reboot) if [[ $BD_CAN_SHUTDOWN == true ]]; then BD_ACTION=reboot-host; else BD_ACTION=reboot; fi ;;
+    poweroff) if [[ $BD_CAN_SHUTDOWN == true ]]; then BD_ACTION=poweroff-host; else BD_ACTION="exit"; fi ;;
     *) BD_ACTION="exit" ;;
     esac
     BD_STOP=1

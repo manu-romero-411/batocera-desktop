@@ -1,7 +1,9 @@
 #!/bin/sh
 # batocera-desktop: replaces shutdown/poweroff/reboot/halt inside the chroot.
-# reboot   -> restarts the Batocera session (applies pending updates)
-# shutdown -> closes Batocera and returns to the desktop (or powers off the host: BD_ON_SHUTDOWN=host)
+# It only signals bd-session, which decides (BD_CAN_SHUTDOWN):
+#   false (default): reboot -> restarts the Batocera session (applies pending updates)
+#                    shutdown/halt/poweroff -> closes Batocera and returns to the desktop
+#   true:            reboot / shutdown really reboot / power off the HOST
 action=poweroff
 case "$(basename "$0")" in reboot) action=reboot ;; esac
 for a in "$@"; do
