@@ -1,64 +1,59 @@
 #!/bin/sh
-# batocera-desktop: NESTED labwc launcher (replaces Batocera's stock labwc-launch).
-# S31emulationstation calls it exactly as on a real Batocera; here labwc uses the
-# wlroots Wayland backend, i.e. it runs as a window of the host compositor.
-
+# batocera-desktop: NESTED labwc launcher
 export LC_ALL=C
 [ -f /etc/profile.d/25-language.sh ] && . /etc/profile.d/25-language.sh
-
 CONF=/userdata/system/.config/labwc
 LOGDIR=/userdata/system/logs
 mkdir -p "$CONF" "$LOGDIR" /var/log
 
-# S14labwc copies the default rc.xml and autostart (autostart launches EmulationStation)
 [ -x /etc/init.d/S14labwc ] && /etc/init.d/S14labwc start
 
 LAYOUT=${BD_XKB_LAYOUT:-$XKB_DEFAULT_LAYOUT}
 VARIANT=${BD_XKB_VARIANT:-$XKB_DEFAULT_VARIANT}
 [ "$LAYOUT" = "en" ] && LAYOUT=us
+
 {
-    echo "XKB_DEFAULT_LAYOUT=$LAYOUT"
-    echo "XKB_DEFAULT_VARIANT=$VARIANT"
+echo "XKB_DEFAULT_LAYOUT=$LAYOUT"
+echo "XKB_DEFAULT_VARIANT=$VARIANT"
 } > "$CONF/environment"
 
 if [ -z "$BD_HOST_WAYLAND" ]; then
-    echo "batocera-desktop: BD_HOST_WAYLAND is empty, no host compositor" >> "$LOGDIR/display.log"
-    exit 1
+echo "batocera-desktop: BD_HOST_WAYLAND is empty, no host compositor" >> "$LOGDIR/display.log"
+exit 1
 fi
 
-# Host compositor: its socket is mounted at $BD_HOST_XDG
 HOST_DISPLAY="$BD_HOST_XDG/$BD_HOST_WAYLAND"
 unset DISPLAY
-export XDG_RUNTIME_DIR=/var/run          # where labwc creates its own wayland-0 (as on Batocera)
-export WAYLAND_DISPLAY="$HOST_DISPLAY"   # labwc replaces it with wayland-0 for its children
+export XDG_RUNTIME_DIR=/var/run
+export WAYLAND_DISPLAY="$HOST_DISPLAY"
 export WLR_BACKENDS=wayland
 export WLR_RENDERER="${BD_WLR_RENDERER:-gles2}"
 export WLR_NO_HARDWARE_CURSORS=1
-[ -n "$BD_RENDER_NODE" ] && export WLR_RENDER_DRM_DEVICE="$BD_RENDER_NODE"
+
+# FIX CRÍTICO: No forzar WLR_RENDER_DRM_DEVICE en el backend wayland.
+# Hacerlo con el driver propietario de NVIDIA causa un crash inmediato de EGL/libc.
+# Las variables __EGL_VENDOR_LIBRARY_FILENAMES ya garantizan que use NVIDIA.
+# [ -n "$BD_RENDER_NODE" ] && export WLR_RENDER_DRM_DEVICE="$BD_RENDER_NODE"
 
 echo "batocera-desktop: nested labwc in $HOST_DISPLAY  renderer=$WLR_RENDERER node=${BD_RENDER_NODE:-auto} layout=$LAYOUT" >> "$LOGDIR/display.log"
 
-# wlroots' wayland backend creates the output at 1280x720: set the default size as soon as
-# labwc is up (not when the host already made the window fullscreen: it follows the host).
-# wlr-randr must talk to the nested labwc, not to the host.
 if [ "$BD_FULLSCREEN" != 1 ]; then
 (
-    export XDG_RUNTIME_DIR=/var/run WAYLAND_DISPLAY=wayland-0
-    want=${BD_RESOLUTION:-1920x1080}
-    i=0
-    while [ $i -lt 100 ]; do
-        out=$(wlr-randr 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) ".*/\1/p' | head -n1)
-        [ -n "$out" ] && break
-        i=$((i + 1)); sleep 0.2
-    done
-    if [ -n "$out" ]; then
-        wlr-randr --output "$out" --custom-mode "$want" >> "$LOGDIR/display.log" 2>&1 \
-            && echo "batocera-desktop: $out -> $want" >> "$LOGDIR/display.log" \
-            || echo "batocera-desktop: wlr-randr could not set $want on $out" >> "$LOGDIR/display.log"
-    fi
+export XDG_RUNTIME_DIR=/var/run WAYLAND_DISPLAY=wayland-0
+want=${BD_RESOLUTION:-1920x1080}
+i=0
+while [ $i -lt 100 ]; do
+out=$(wlr-randr 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) ".*/\1/p' | head -n1)
+[ -n "$out" ] && break
+i=$((i + 1)); sleep 0.2
+done
+if [ -n "$out" ]; then
+wlr-randr --output "$out" --custom-mode "$want" >> "$LOGDIR/display.log" 2>&1
+fi
 ) &
 fi
 
 if [ "$BD_LABWC_DEBUG" = 1 ]; then DBG=-d; else DBG=; fi
-# shellcheck disable=SC2086
-exec /usr/bin/labwc $DBG -C "$CONF" > /var/log/labwc.log 2>&1
+
+# FIX LOG: Guardar en /userdata (disco real) para que no se borre al petar el tmpfs
+exec /usr/bin/labwc $DBG -C "$CONF" > "$LOGDIR/labwc.log" 2>&1

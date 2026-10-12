@@ -425,18 +425,19 @@ bd_x11_gpu_conf() {
 
 # --------------------------------------------------------------- utilities
 bd_chroot_proc() {   # is there a process with that comm inside the chroot?
-  local p c r name=${1:0:15} alts=" $1 "
-  # X11: Xorg-shim does `exec Xorg.real`, so the kernel comm is "Xorg.real", never "Xorg".
-  # Debian's wrapper and the unwrapped binaries have their own names too.
-  [[ $name == Xorg ]] && alts=" Xorg Xorg.real Xorg.wrap Xorg.wrap.real X.real "
-  for p in "$BD_ROOT"/proc/[0-9]*; do
-    [[ -r $p/comm ]] || continue
-    read -r c <"$p/comm" 2>/dev/null || continue
-    [[ $alts == *" $c "* ]] || continue
-    r=$(readlink "$p/root" 2>/dev/null) || continue
-    [[ $r == "$BD_ROOT" ]] && return 0
-  done
-  return 1
+local p c r alts name=${1:0:15}
+# X11: nuestro shim hace exec Xorg.real, asi que el comm del kernel nunca es
+# "Xorg"; Debian ademas tiene Xorg.wrap. Aceptamos todos los nombres posibles.
+alts=" $name "
+[[ $name == Xorg ]] && alts=" Xorg Xorg.real Xorg.wrap Xorg.wrap.real X "
+for p in "$BD_ROOT"/proc/[0-9]*; do
+[[ -r $p/comm ]] || continue
+read -r c <"$p/comm" 2>/dev/null || continue
+[[ $alts == *" $c "* ]] || continue
+r=$(readlink "$p/root" 2>/dev/null) || continue
+[[ $r == "$BD_ROOT" ]] && return 0
+done
+return 1
 }
 
 bd_kill_chroot_procs() {   # signal

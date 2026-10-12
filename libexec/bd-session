@@ -31,30 +31,53 @@ cmd_launch() {
     [[ -n $uid && $uid != 0 ]] || bd_die "run it as your desktop user (through sudo), not as root"
     while (($#)); do
         case $1 in
-            --mode)        mode=${2:-}; shift 2 ;;
-            --tty)         tty=${2:-}; shift 2 ;;
-            --wayland)     wl=${2:-}; shift 2 ;;
-            --xdg)         xdg=${2:-}; shift 2 ;;
-            --xkb-layout)  xl=${2:-}; shift 2 ;;
-            --xkb-variant) xv=${2:-}; shift 2 ;;
-            --fullscreen)  fs=${2:-0}; shift 2 ;;
-            *) bd_die "unknown argument: $1" ;;
+        --mode)
+            mode=${2:-}
+            shift 2
+            ;;
+        --tty)
+            tty=${2:-}
+            shift 2
+            ;;
+        --wayland)
+            wl=${2:-}
+            shift 2
+            ;;
+        --xdg)
+            xdg=${2:-}
+            shift 2
+            ;;
+        --xkb-layout)
+            xl=${2:-}
+            shift 2
+            ;;
+        --xkb-variant)
+            xv=${2:-}
+            shift 2
+            ;;
+        --fullscreen)
+            fs=${2:-0}
+            shift 2
+            ;;
+        *) bd_die "unknown argument: $1" ;;
         esac
     done
     [[ $xdg == "/run/user/$uid" ]] || bd_die "unexpected XDG_RUNTIME_DIR: '$xdg'"
     [[ $fs == [01] ]] || bd_die "invalid --fullscreen value"
     case $mode in
-        nested)
-            ((P_NESTED)) || bd_die "variant $BD_VARIANT is $P_DISPLAY/X11-only: nested mode is not available for it. Start it on a text console (drm/tty mode) or with the systemd service."
-            [[ $wl =~ ^wayland-[0-9]+$ ]] || bd_die "invalid Wayland display name: '$wl'"
-            [[ -S $xdg/$wl ]] || bd_die "Wayland socket $xdg/$wl does not exist (is this a Wayland session?)"
-            tty="" ;;
-        drm)
-            # passwordless sudo: the VT must be a real console owned by the caller
-            [[ $tty =~ ^/dev/tty[1-9][0-9]*$ && -c $tty ]] || bd_die "invalid tty: '$tty'"
-            [[ $(stat -c %u "$tty") == "$uid" ]] || bd_die "$tty does not belong to your user"
-            wl="" ;;
-        *) bd_die "unknown mode: '$mode' (nested|drm)" ;;
+    nested)
+        ((P_NESTED)) || bd_die "variant $BD_VARIANT is $P_DISPLAY/X11-only: nested mode is not available for it. Start it on a text console (drm/tty mode) or with the systemd service."
+        [[ $wl =~ ^wayland-[0-9]+$ ]] || bd_die "invalid Wayland display name: '$wl'"
+        [[ -S $xdg/$wl ]] || bd_die "Wayland socket $xdg/$wl does not exist (is this a Wayland session?)"
+        tty=""
+        ;;
+    drm)
+        # passwordless sudo: the VT must be a real console owned by the caller
+        [[ $tty =~ ^/dev/tty[1-9][0-9]*$ && -c $tty ]] || bd_die "invalid tty: '$tty'"
+        [[ $(stat -c %u "$tty") == "$uid" ]] || bd_die "$tty does not belong to your user"
+        wl=""
+        ;;
+    *) bd_die "unknown mode: '$mode' (nested|drm)" ;;
     esac
     [[ $xl =~ ^[A-Za-z0-9_,-]*$ && $xv =~ ^[A-Za-z0-9_,-]*$ ]] || bd_die "invalid keyboard layout"
     exec env BD_MODE="$mode" BD_TTY="$tty" BD_UID="$uid" BD_WAYLAND="$wl" BD_XDG="$xdg" \
@@ -68,9 +91,13 @@ cmd_launch() {
 bd_resolve_session() {
     local n u
     if [[ -z ${BD_MODE:-} ]]; then
-        BD_MODE=drm; BD_SERVICE=1
+        BD_MODE=drm
+        BD_SERVICE=1
         if [[ -z ${BD_TTY:-} ]]; then
-            n=$(bd_free_vt "$BD_TTY_MIN") || { bd_warn "no free VT from tty$BD_TTY_MIN up"; return 1; }
+            n=$(bd_free_vt "$BD_TTY_MIN") || {
+                bd_warn "no free VT from tty$BD_TTY_MIN up"
+                return 1
+            }
             BD_TTY=/dev/tty$n
             bd_log "service start: using the free console tty$n"
         fi
@@ -81,26 +108,41 @@ bd_resolve_session() {
         [[ -n $BD_UID ]] && bd_log "desktop user for audio: $u (set BD_USER to choose another)"
     fi
     case $BD_MODE in
-        nested)
-            ((P_NESTED)) || { bd_warn "variant $BD_VARIANT has no nested mode (X11 build): use a text console or the service"; return 1; }
-            [[ -n ${BD_WAYLAND:-} ]] || { bd_warn "nested mode needs a Wayland display"; return 1; } ;;
-        drm)
-            [[ ${BD_TTY:-} =~ ^/dev/tty[1-9][0-9]*$ ]] || { bd_warn "drm mode needs a /dev/ttyN"; return 1; }
-            # audio comes from the user's PipeWire: make sure it exists (service start, no login)
-            if [[ $BD_AUDIO == host ]]; then
-                if [[ -n ${BD_XDG:-} && -d $BD_XDG ]]; then
-                    :   # known already (started from the user's own console)
-                elif [[ -n ${BD_UID:-} ]]; then
-                    if bd_ensure_user_runtime "$BD_UID"; then BD_XDG=/run/user/$BD_UID
-                    else bd_warn "no runtime dir for uid $BD_UID: Batocera will have no audio"; fi
-                else
-                    bd_warn "no desktop user found (set BD_USER in /etc/batocera-desktop.conf): Batocera will have NO audio"
-                fi
-                if [[ -n ${BD_XDG:-} && ! -S $BD_XDG/pulse/native ]]; then
-                    bd_warn "no PipeWire-Pulse socket at $BD_XDG/pulse/native (is pipewire-pulse installed and enabled for that user?): Batocera will have NO audio"
-                fi
-            fi ;;
-        *) bd_warn "unknown mode '$BD_MODE'"; return 1 ;;
+    nested)
+        ((P_NESTED)) || {
+            bd_warn "variant $BD_VARIANT has no nested mode (X11 build): use a text console or the service"
+            return 1
+        }
+        [[ -n ${BD_WAYLAND:-} ]] || {
+            bd_warn "nested mode needs a Wayland display"
+            return 1
+        }
+        ;;
+    drm)
+        [[ ${BD_TTY:-} =~ ^/dev/tty[1-9][0-9]*$ ]] || {
+            bd_warn "drm mode needs a /dev/ttyN"
+            return 1
+        }
+        # audio comes from the user's PipeWire: make sure it exists (service start, no login)
+        if [[ $BD_AUDIO == host ]]; then
+            if [[ -n ${BD_XDG:-} && -d $BD_XDG ]]; then
+                : # known already (started from the user's own console)
+            elif [[ -n ${BD_UID:-} ]]; then
+                if bd_ensure_user_runtime "$BD_UID"; then
+                    BD_XDG=/run/user/$BD_UID
+                else bd_warn "no runtime dir for uid $BD_UID: Batocera will have no audio"; fi
+            else
+                bd_warn "no desktop user found (set BD_USER in /etc/batocera-desktop.conf): Batocera will have NO audio"
+            fi
+            if [[ -n ${BD_XDG:-} && ! -S $BD_XDG/pulse/native ]]; then
+                bd_warn "no PipeWire-Pulse socket at $BD_XDG/pulse/native (is pipewire-pulse installed and enabled for that user?): Batocera will have NO audio"
+            fi
+        fi
+        ;;
+    *)
+        bd_warn "unknown mode '$BD_MODE'"
+        return 1
+        ;;
     esac
     export BD_MODE BD_TTY BD_UID BD_WAYLAND BD_XDG BD_XKB_LAYOUT_HOST BD_XKB_VARIANT_HOST BD_FS
 }
@@ -121,13 +163,14 @@ bd_assert_image() {
         [[ $m == "$BD_VARIANT" ]] || bd_die "the image in $BD_BOOT_DIR was installed as '$m' but BD_VARIANT is '$BD_VARIANT'"
     fi
     if [[ -f $f/batocera.board ]]; then
-        b=$(<"$f/batocera.board"); b=${b//[[:space:]]/}
+        b=$(<"$f/batocera.board")
+        b=${b//[[:space:]]/}
         for m in $P_BOARDS; do [[ $b == "$m" ]] && ok=1; done
         ((ok)) || bd_die "image board is '$b' but variant $BD_VARIANT expects: $P_BOARDS"
     fi
 }
 
-bd_assert_image_quiet() { ( bd_assert_image ) >/dev/null 2>&1; }
+bd_assert_image_quiet() { (bd_assert_image) >/dev/null 2>&1; }
 
 cmd_run() {
     need_root
@@ -163,12 +206,20 @@ cmd_run() {
         if [[ $BD_MODE == drm ]]; then
             python3 "$BD_PREFIX/libexec/bd-vt" reset "$BD_TTY" || bd_warn "could not restore VT $BD_TTY"
         fi
-        act=$(cat "$BD_ACTION_FILE" 2>/dev/null); rm -f "$BD_ACTION_FILE"
+        act=$(cat "$BD_ACTION_FILE" 2>/dev/null)
+        rm -f "$BD_ACTION_FILE"
         ((BD_RUN_STOP)) && break
         case $act in
-            reboot) bd_log "restarting the Batocera session"; continue ;;
-            poweroff-host) bd_log "powering off the machine"; systemctl poweroff; break ;;
-            *) break ;;
+        reboot)
+            bd_log "restarting the Batocera session"
+            continue
+            ;;
+        poweroff-host)
+            bd_log "powering off the machine"
+            systemctl poweroff
+            break
+            ;;
+        *) break ;;
         esac
     done
     if ((BD_SERVICE)); then
@@ -180,13 +231,13 @@ cmd_run() {
 }
 
 bd_on_term() { BD_STOP=1; }
-bd_on_usr1() {   # sent by the shutdown/reboot shims inside the chroot
+bd_on_usr1() { # sent by the shutdown/reboot shims inside the chroot
     local a
     a=$(cat "$BD_ROOT/run/bd-action" 2>/dev/null)
     case $a in
-        reboot) BD_ACTION=reboot ;;
-        poweroff) if [[ $BD_ON_SHUTDOWN == host ]]; then BD_ACTION=poweroff-host; else BD_ACTION="exit"; fi ;;
-        *) BD_ACTION="exit" ;;
+    reboot) BD_ACTION=reboot ;;
+    poweroff) if [[ $BD_ON_SHUTDOWN == host ]]; then BD_ACTION=poweroff-host; else BD_ACTION="exit"; fi ;;
+    *) BD_ACTION="exit" ;;
     esac
     BD_STOP=1
 }
@@ -194,9 +245,9 @@ bd_on_usr1() {   # sent by the shutdown/reboot shims inside the chroot
 bd_mount_layers() {
     local o=$BD_RUN/ovl lowers
     mkdir -p "$o"/{base,base2,overlay,work,saved} "$BD_ROOT"
-    [[ -f $BD_BOOT_DIR/boot/batocera ]] \
-        || bd_die "missing $BD_BOOT_DIR/boot/batocera  (run: batocera-desktop install)"
-    if [[ -s $BD_BOOT_DIR/boot/overlay ]]; then      # overlay saved with batocera-save-overlay
+    [[ -f $BD_BOOT_DIR/boot/batocera ]] ||
+        bd_die "missing $BD_BOOT_DIR/boot/batocera  (run: batocera-desktop install)"
+    if [[ -s $BD_BOOT_DIR/boot/overlay ]]; then # overlay saved with batocera-save-overlay
         if mount -o loop,ro "$BD_BOOT_DIR/boot/overlay" "$o/saved"; then
             cp -a "$o/saved/." "$o/overlay/" || bd_warn "could not copy the saved overlay"
             umount "$o/saved"
@@ -206,12 +257,12 @@ bd_mount_layers() {
     fi
     mount -o loop,ro "$BD_BOOT_DIR/boot/batocera" "$o/base" || bd_die "cannot mount boot/batocera"
     lowers=$o/base
-    if [[ -f $BD_BOOT_DIR/boot/rufomaculata ]]; then  # second layer (the initrd merges both)
+    if [[ -f $BD_BOOT_DIR/boot/rufomaculata ]]; then # second layer (the initrd merges both)
         mount -o loop,ro "$BD_BOOT_DIR/boot/rufomaculata" "$o/base2" || bd_die "cannot mount boot/rufomaculata"
         lowers=$lowers:$o/base2
     fi
-    mount -t overlay overlay -o "rw,lowerdir=$lowers,upperdir=$o/overlay,workdir=$o/work" "$BD_ROOT" \
-        || bd_die "cannot mount the rootfs overlay"
+    mount -t overlay overlay -o "rw,lowerdir=$lowers,upperdir=$o/overlay,workdir=$o/work" "$BD_ROOT" ||
+        bd_die "cannot mount the rootfs overlay"
 }
 
 bd_mount_runtime() {
@@ -219,9 +270,12 @@ bd_mount_runtime() {
     mkdir -p "$BD_USERDATA"
     bd_bind "$BD_BOOT_DIR" /boot || return 1
     bd_bind "$BD_USERDATA" /userdata || return 1
+    mkdir -p "$BD_USERDATA/system/varlog"
+    bd_bind "$BD_USERDATA/system/varlog" /var/log || return 1 # labwc.log sobrevive al crash
     bd_bind "$BD_RUN/ovl" /overlay "" rec || return 1
 
-    P=$(bd_rpath "$R" /proc); mkdir -p "$P"
+    P=$(bd_rpath "$R" /proc)
+    mkdir -p "$P"
     mount -t proc -o nosuid,nodev,noexec proc "$P" || return 1
     # Batocera runs sysctl/sysrq: keep it away from the host
     mount --bind "$P/sys" "$P/sys" && mount -o remount,bind,ro "$P/sys"
@@ -229,34 +283,46 @@ bd_mount_runtime() {
         mount --bind "$P/sysrq-trigger" "$P/sysrq-trigger" && mount -o remount,bind,ro "$P/sysrq-trigger"
     fi
 
-    S=$(bd_rpath "$R" /sys); mkdir -p "$S"
+    S=$(bd_rpath "$R" /sys)
+    mkdir -p "$S"
     mount --bind /sys "$S" && mount -o remount,bind,ro "$S"
     bd_bind /dev /dev "" rec || return 1
 
-    P=$(bd_rpath "$R" /run); mkdir -p "$P"
+    P=$(bd_rpath "$R" /run)
+    mkdir -p "$P"
     mount -t tmpfs -o mode=0755,nosuid,nodev,size=256M tmpfs "$P" || return 1
-    P=$(bd_rpath "$R" /tmp); mkdir -p "$P"
+    P=$(bd_rpath "$R" /tmp)
+    mkdir -p "$P"
     mount -t tmpfs -o mode=1777,nosuid,nodev,size="$BD_TMP_SIZE" tmpfs "$P" || return 1
 
     [[ -e $(bd_rpath "$R" /var/run) ]] || bd_ln /var/run /run
-    [[ -d /run/udev ]] && bd_bind /run/udev /run/udev ro   # libudev/SDL: gamepad classification from the host
+    [[ -d /run/udev ]] && bd_bind /run/udev /run/udev ro # libudev/SDL: gamepad classification from the host
     if [[ -n ${BD_XDG:-} && -d $BD_XDG ]]; then bd_bind "$BD_XDG" /run/host-xdg; fi
     case $BD_BT in
-        host)
-            [[ -S /run/dbus/system_bus_socket ]] && bd_bind /run/dbus/system_bus_socket /run/dbus/system_bus_socket
-            [[ -d /var/lib/bluetooth ]] && bd_bind /var/lib/bluetooth /var/lib/bluetooth ;;
+    host)
+        [[ -S /run/dbus/system_bus_socket ]] && bd_bind /run/dbus/system_bus_socket /run/dbus/system_bus_socket
+        [[ -d /var/lib/bluetooth ]] && bd_bind /var/lib/bluetooth /var/lib/bluetooth
+        ;;
     esac
-    [[ $BD_BIND_MEDIA == 1 && -d /media ]] && { bd_bind /media /media "" rec; mount --make-rslave "$(bd_rpath "$R" /media)" 2>/dev/null; }
+    [[ $BD_BIND_MEDIA == 1 && -d /media ]] && {
+        bd_bind /media /media "" rec
+        mount --make-rslave "$(bd_rpath "$R" /media)" 2>/dev/null
+    }
     [[ $BD_BIND_MODULES == 1 && -d /lib/modules ]] && bd_bind /lib/modules /lib/modules ro
     for spec in $BD_EXTRA_BINDS; do
         IFS=: read -r src dst opt <<<"$spec"
-        [[ -e $src && -n $dst ]] || { bd_warn "extra bind ignored: $spec"; continue; }
+        [[ -e $src && -n $dst ]] || {
+            bd_warn "extra bind ignored: $spec"
+            continue
+        }
         bd_bind "$src" "$dst" "$opt" rec
     done
 
     # resolv.conf (may be a symlink in the rootfs; replace the leaf, never write through it)
-    dst=$(bd_rleaf "$R" /etc/resolv.conf); mkdir -p "${dst%/*}"
-    rm -f -- "$dst"; cat /etc/resolv.conf >"$dst" 2>/dev/null
+    dst=$(bd_rleaf "$R" /etc/resolv.conf)
+    mkdir -p "${dst%/*}"
+    rm -f -- "$dst"
+    cat /etc/resolv.conf >"$dst" 2>/dev/null
     return 0
 }
 
@@ -277,9 +343,13 @@ bd_inject_triggerhappy() {
     f=$(bd_rleaf "$BD_ROOT" /etc/default/triggerhappy) || return 1
     mkdir -p "${f%/*}"
     tmp=$(mktemp)
-    { [[ -f $f ]] && sed '/^# --- batocera-desktop begin/,$d' "$f"
-      sed "s/@STEP@/$step/g" "$BD_PREFIX/share/chroot/etc/default/triggerhappy"; } >"$tmp"
-    rm -f -- "$f"; install -m 0644 -- "$tmp" "$f"; rm -f "$tmp"
+    {
+        [[ -f $f ]] && sed '/^# --- batocera-desktop begin/,$d' "$f"
+        sed "s/@STEP@/$step/g" "$BD_PREFIX/share/chroot/etc/default/triggerhappy"
+    } >"$tmp"
+    rm -f -- "$f"
+    install -m 0644 -- "$tmp" "$f"
+    rm -f "$tmp"
 }
 
 bd_inject_files() {
@@ -290,7 +360,8 @@ bd_inject_files() {
         # Keep the original as .real (unless it already is our shim, e.g. after batocera-save-overlay)
         l=$(bd_rleaf "$BD_ROOT" /usr/bin/batocera-resolution)
         if [[ -e $l || -L $l ]] && ! grep -qs bd-shim-resolution "$l"; then
-            rm -f -- "$l.real"; cp -a -- "$l" "$l.real" || return 1
+            rm -f -- "$l.real"
+            cp -a -- "$l" "$l.real" || return 1
         fi
         bd_put "$BD_PREFIX/share/chroot/usr/bin/batocera-resolution" /usr/bin/batocera-resolution 0755 || return 1
         echo "$BD_RESOLUTION" >"$(bd_rpath "$BD_ROOT" /run)/bd-resolution"
@@ -300,8 +371,8 @@ bd_inject_files() {
         bd_inject_xorg || return 1
         local md=/usr/lib/xorg/modules
         [[ -d $(bd_rpath "$BD_ROOT" "$md") ]] || md=/usr/lib64/xorg/modules
-        bd_x11_gpu_conf "$(bd_rleaf "$BD_ROOT" /etc/X11/xorg.conf.d/10-bd-gpu.conf)" "$md" \
-            || bd_warn "could not write the Xorg GPU configuration"
+        bd_x11_gpu_conf "$(bd_rleaf "$BD_ROOT" /etc/X11/xorg.conf.d/10-bd-gpu.conf)" "$md" ||
+            bd_warn "could not write the Xorg GPU configuration"
     fi
     ((P_LEGACY)) && bd_inject_alsa_pulse
     bd_put "$BD_PREFIX/share/chroot/usr/bin/bd-audio-inherit" /usr/bin/bd-audio-inherit 0755 || return 1
@@ -320,13 +391,15 @@ bd_inject_files() {
 }
 
 bd_prepare_gpu() {
-    BD_GPU_MODE=mesa; BD_RENDER_NODE=""
+    BD_GPU_MODE=mesa
+    BD_RENDER_NODE=""
     if [[ $BD_GPU != mesa ]] && bd_nvidia_detect; then
         if bd_nvidia_collect; then
             if bd_nvidia_stage; then
                 BD_GPU_MODE=nvidia
                 if [[ $P_DISPLAY == x11 ]]; then
-                    if bd_nvidia_xcollect && bd_nvidia_xstage; then bd_log "X11: host nvidia_drv.so + libglxserver_nvidia staged"
+                    if bd_nvidia_xcollect && bd_nvidia_xstage; then
+                        bd_log "X11: host nvidia_drv.so + libglxserver_nvidia staged"
                     else bd_warn "X11 + NVIDIA: host nvidia_drv.so / libglxserver_nvidia.so.$NV_VER not found or not mountable: Xorg will not be able to use the NVIDIA GPU (BD_GPU=mesa to use another one)"; fi
                 fi
                 BD_RENDER_NODE=$(bd_render_node nvidia || true)
@@ -346,9 +419,6 @@ bd_build_env() {
         PATH=/usr/bin:/usr/sbin:/bin:/sbin
         HOME=/userdata/system
         TERM="${TERM:-linux}"
-DISPLAY=:1
-DISPLAY=:1
-        DISPLAY=:1
         BD_SESSION=1
         BD_MODE="${BD_MODE:-nested}"
         BD_HOST_XDG=/run/host-xdg
@@ -367,6 +437,12 @@ DISPLAY=:1
     if [[ ${BD_MODE:-nested} == drm && $P_DISPLAY == wayland ]]; then
         [[ -n $BD_DRM_DEVICES ]] && BD_ENV+=(WLR_DRM_DEVICES="$BD_DRM_DEVICES")
         [[ $BD_GPU_MODE == nvidia ]] && BD_ENV+=(WLR_NO_HARDWARE_CURSORS=1)
+        # Forzamos el backend DRM y el seat builtin para que no intente usar X11 ni logind
+        BD_ENV+=(LIBSEAT_BACKEND=builtin SEAT=seat0)
+    fi
+    # Solo exportamos DISPLAY para las variantes X11
+    if [[ $P_DISPLAY == x11 ]]; then
+        BD_ENV+=(DISPLAY=:1)
     fi
     [[ -n ${BD_TTY:-} ]] && BD_ENV+=(BD_VT_NUM="${BD_TTY#/dev/tty}")
     if [[ $BD_GPU_MODE == nvidia ]]; then
@@ -381,7 +457,10 @@ DISPLAY=:1
 
 bd_prepare() {
     mkdir -p "$BD_RUN" "$BD_LOGDIR"
-    mount -t tmpfs -o "size=$BD_OVERLAY_SIZE,mode=0755" tmpfs "$BD_RUN" || { bd_warn "tmpfs mount failed"; return 1; }
+    mount -t tmpfs -o "size=$BD_OVERLAY_SIZE,mode=0755" tmpfs "$BD_RUN" || {
+        bd_warn "tmpfs mount failed"
+        return 1
+    }
     bd_mount_layers
     bd_mount_runtime || return 1
     bd_prepare_gpu
@@ -389,13 +468,16 @@ bd_prepare() {
     bd_build_env
 }
 
-bd_cr() {   # run a command in the chroot with the Batocera environment
+bd_cr() { # run a command in the chroot with the Batocera environment
     env -i "${BD_ENV[@]}" chroot "$BD_ROOT" "$@"
 }
 
-bd_svc() {  # service action
+bd_svc() { # service action
     local s=$1 a=$2 f
-    [[ -x $(bd_rpath "$BD_ROOT" "/etc/init.d/$s") ]] || { bd_warn "service $s not found, skipping"; return 1; }
+    [[ -x $(bd_rpath "$BD_ROOT" "/etc/init.d/$s") ]] || {
+        bd_warn "service $s not found, skipping"
+        return 1
+    }
     f=$BD_LOGDIR/service-$s.log
     bd_log "$s $a  (log: $f)"
     timeout 600 env -i "${BD_ENV[@]}" chroot "$BD_ROOT" "/etc/init.d/$s" "$a" </dev/null >>"$f" 2>&1
@@ -407,26 +489,36 @@ bd_svc() {  # service action
 # -------------------------------------------------------------------- Bluetooth
 bd_bt_start() {
     case $BD_BT in
-        host)
-            [[ -S /run/dbus/system_bus_socket ]] || { bd_warn "no system D-Bus: Bluetooth will not work in Batocera"; return; }
-            bd_cr /bin/sh -c 'a=$(batocera-settings-get bluetooth.adapter 2>/dev/null)
+    host)
+        [[ -S /run/dbus/system_bus_socket ]] || {
+            bd_warn "no system D-Bus: Bluetooth will not work in Batocera"
+            return
+        }
+        bd_cr /bin/sh -c 'a=$(batocera-settings-get bluetooth.adapter 2>/dev/null)
                 start-stop-daemon -S -q -m -p /var/run/bluetooth-agent.pid --exec /usr/bin/batocera-bluetooth-agent -- ${a:+--device "$a"} >/dev/null 2>&1 &' \
-                </dev/null >>"$BD_LOGDIR/bluetooth.log" 2>&1 ;;
-        exclusive)
-            bd_warn "exclusive BT (experimental): stopping the host's bluetooth.service"
-            systemctl stop bluetooth.service
-            bd_svc S30dbus start; bd_svc S29namebluetooth start; bd_svc S32bluetooth start ;;
+            </dev/null >>"$BD_LOGDIR/bluetooth.log" 2>&1
+        ;;
+    exclusive)
+        bd_warn "exclusive BT (experimental): stopping the host's bluetooth.service"
+        systemctl stop bluetooth.service
+        bd_svc S30dbus start
+        bd_svc S29namebluetooth start
+        bd_svc S32bluetooth start
+        ;;
     esac
 }
 bd_bt_stop() {
     case $BD_BT in
-        host) bd_cr /bin/sh -c 'start-stop-daemon -K -q -p /var/run/bluetooth-agent.pid' </dev/null >/dev/null 2>&1 ;;
-        exclusive) bd_svc S32bluetooth stop; systemctl start bluetooth.service ;;
+    host) bd_cr /bin/sh -c 'start-stop-daemon -K -q -p /var/run/bluetooth-agent.pid' </dev/null >/dev/null 2>&1 ;;
+    exclusive)
+        bd_svc S32bluetooth stop
+        systemctl start bluetooth.service
+        ;;
     esac
 }
 
 # ---------------------------------------------------------------------- main loop
-bd_diag_procs() {   # why did the session end? list what is (not) running in the chroot
+bd_diag_procs() { # why did the session end? list what is (not) running in the chroot
     local p c a r f=$BD_LOGDIR/session-diag.log
     {
         echo "=== $(date '+%F %T') $1"
@@ -442,19 +534,18 @@ bd_diag_procs() {   # why did the session end? list what is (not) running in the
 }
 
 bd_wait_session() {
-local t=0 seen=0 miss=0 xgone=0
+local t=0 seen=0 miss=0 cgone=0
 while ((!BD_STOP)); do
 if bd_chroot_proc "$P_COMP"; then
 ((seen)) || bd_log "$P_COMP is up"
-((xgone)) && bd_log "$P_COMP is back"
-seen=1; xgone=0
+((cgone)) && bd_log "$P_COMP is back"
+seen=1; cgone=0
 elif ((seen)); then
-if [[ $P_DISPLAY == x11 ]]; then
-# X11: el supervisor stock (emulationstation-standalone) relanza Xorg y ES por
-# su cuenta; ausencias breves son normales. Solo una ausencia larga significa
-# que murio todo el stack (supervisor incluido).
-((xgone == 1)) && bd_log "$P_COMP is gone (X11: waiting for the standalone loop to respawn it)"
-((++xgone >= 15)) && { bd_log "the display server ($P_COMP) has been down for ${xgone}s: X11 stack dead"; bd_diag_procs "$P_COMP gone"; break; }
+if [[ ${BD_MODE:-nested} == drm ]]; then
+# drm: el supervisor stock (emulationstation-standalone) posee y relanza el
+# servidor grafico y ES; ausencias breves son normales. No matar la sesion.
+((cgone == 1)) && bd_log "$P_COMP is gone (drm: esperando a que el loop lo relance)"
+((++cgone == 30)) && bd_warn "$P_COMP lleva 30s sin reaparecer; si no se recupera: display.log y system/varlog/"
 else
 bd_log "the display server ($P_COMP) was closed"; bd_diag_procs "$P_COMP gone"; break
 fi
@@ -465,12 +556,10 @@ fi
 if ((seen)); then
 if bd_chroot_proc emulationstation; then
 miss=0
-elif [[ $P_DISPLAY == x11 ]]; then
-# X11: ES puede estar en crash-loop bajo el supervisor stock: avisar una vez y
-# NO matar la sesion (el supervisor sigue reintentando y puede recuperarse).
-((++miss == 5)) && bd_warn "EmulationStation no se ve vivo (crash loop?): revisa /userdata/system/logs/es_log.txt y display.log; la sesion X11 se mantiene viva"
+elif [[ ${BD_MODE:-nested} == drm ]]; then
+((++miss == 5)) && bd_warn "EmulationStation no se ve vivo (crash loop o arranque lento): revisa /userdata/system/logs/es_log.txt; la sesion drm sigue viva"
 else
-((++miss >= 15)) && { bd_log "EmulationStation has exited"; bd_diag_procs "ES missing (X seen)"; break; }
+((++miss >= 15)) && { bd_log "EmulationStation has exited"; bd_diag_procs "ES missing (compositor seen)"; break; }
 fi
 fi
 sleep 1 & wait $!
@@ -483,23 +572,28 @@ done
 # host's current state into batocera.conf (the SHARE partition) so ES shows the same values.
 bd_audio_inherit() {
     [[ $BD_AUDIO == host && $BD_AUDIO_SYNC == 1 && -n ${BD_XDG:-} ]] || return 0
-    bd_cr /usr/bin/bd-audio-inherit >>"$BD_LOGDIR/audio.log" 2>&1 \
-        || bd_warn "could not inherit the host audio state (see $BD_LOGDIR/audio.log)"
+    bd_cr /usr/bin/bd-audio-inherit >>"$BD_LOGDIR/audio.log" 2>&1 ||
+        bd_warn "could not inherit the host audio state (see $BD_LOGDIR/audio.log)"
 }
 
 bd_stop_services() {
     local i
     for ((i = ${#SVC_STARTED[@]} - 1; i >= 0; i--)); do bd_svc "${SVC_STARTED[i]}" stop; done
     bd_bt_stop
-    bd_kill_chroot_procs TERM; sleep 2; bd_kill_chroot_procs KILL
+    bd_kill_chroot_procs TERM
+    sleep 2
+    bd_kill_chroot_procs KILL
 }
 
 cmd_inner() {
     need_root
     trap bd_on_term TERM INT HUP
     trap bd_on_usr1 USR1
-    hostname batocera 2>/dev/null   # private UTS namespace: the host is unaffected
-    if ! bd_prepare; then echo exit >"$BD_ACTION_FILE"; exit 1; fi
+    hostname batocera 2>/dev/null # private UTS namespace: the host is unaffected
+    if ! bd_prepare; then
+        echo exit >"$BD_ACTION_FILE"
+        exit 1
+    fi
     local s
     bd_log "rootfs, mounts and GPU ready"
     # S04populate runs `ldconfig &` detached ON PURPOSE (slow: "perf issue (boot time)"). The NVIDIA
@@ -507,7 +601,7 @@ cmd_inner() {
     # it and do not run a second full ldconfig (it doubled the start-up cost). Batocera itself
     # does not wait for it. Only if the service started none, run it ourselves.
     if bd_svc S04populate start; then
-        sleep 0.2   # let the detached ldconfig fork
+        sleep 0.2 # let the detached ldconfig fork
         if bd_chroot_proc ldconfig || [[ $(bd_rpath "$BD_ROOT" /etc/ld.so.cache) -nt $BD_RUN/ovl ]]; then
             bd_log "ldconfig already started by S04populate (not waiting for it)"
         else
@@ -546,7 +640,7 @@ cmd_enter_inner() {
     if (($#)); then bd_cr "$@"; else bd_cr /bin/bash -l 2>/dev/null || bd_cr /bin/sh; fi
 }
 
-cmd_update() {   # batocera-desktop update [batocera-upgrade args]
+cmd_update() { # batocera-desktop update [batocera-upgrade args]
     local -a args=("$@")
     ((${#args[@]})) || args=(--upgrade)
     cmd_enter -- batocera-upgrade "${args[@]}"
@@ -569,15 +663,28 @@ bd_image_version() {
 bd_extract_img() {
     local img=$1 dest=$2 work loop rc=1
     work=$(mktemp -d /var/tmp/bd-img.XXXXXX) || return 1
-    if [[ $img == *.gz ]]; then gzip -dc <"$img" >"$work/disk.img" || { rm -rf "$work"; return 1; }; img=$work/disk.img; fi
-    loop=$(losetup -rfP --show "$img") || { rm -rf "$work"; return 1; }
+    if [[ $img == *.gz ]]; then
+        gzip -dc <"$img" >"$work/disk.img" || {
+            rm -rf "$work"
+            return 1
+        }
+        img=$work/disk.img
+    fi
+    loop=$(losetup -rfP --show "$img") || {
+        rm -rf "$work"
+        return 1
+    }
     mkdir -p "$work/mnt"
-    for _ in 1 2 3 4 5; do [[ -b ${loop}p1 ]] && break; sleep 0.5; done
+    for _ in 1 2 3 4 5; do
+        [[ -b ${loop}p1 ]] && break
+        sleep 0.5
+    done
     if mount -o ro "${loop}p1" "$work/mnt"; then
         cp -a "$work/mnt/." "$dest/" && rc=0
         umount "$work/mnt"
     fi
-    losetup -d "$loop"; rm -rf "$work"
+    losetup -d "$loop"
+    rm -rf "$work"
     return $rc
 }
 
@@ -586,13 +693,31 @@ cmd_install() {
     local file="" img="" dl=0 variant=$BD_VARIANT type=$BD_UPDATE_TYPE force=0 url="" md5 tmp ver b ok=0 m old
     while (($#)); do
         case $1 in
-            --file) file=$2; shift 2 ;;
-            --img) img=$2; shift 2 ;;
-            --download) dl=1; shift ;;
-            --variant) variant=${2:-}; shift 2 ;;
-            --type) type=$2; shift 2 ;;
-            --force) force=1; shift ;;
-            *) bd_die "unknown argument: $1" ;;
+        --file)
+            file=$2
+            shift 2
+            ;;
+        --img)
+            img=$2
+            shift 2
+            ;;
+        --download)
+            dl=1
+            shift
+            ;;
+        --variant)
+            variant=${2:-}
+            shift 2
+            ;;
+        --type)
+            type=$2
+            shift 2
+            ;;
+        --force)
+            force=1
+            shift
+            ;;
+        *) bd_die "unknown argument: $1" ;;
         esac
     done
     # 1) cancel BEFORE touching anything if this variant does not fit the machine
@@ -608,9 +733,9 @@ cmd_install() {
     fi
     if ((dl)); then
         case $variant in
-            5.26-amd64) url=$BD_URL_526_AMD64 ;;
-            5.26-i386)  url=$BD_URL_526_I386 ;;
-            *)          url=$BD_UPDATE_URL/$P_URLPATH/$type/last/boot.tar.xz ;;
+        5.26-amd64) url=$BD_URL_526_AMD64 ;;
+        5.26-i386) url=$BD_URL_526_I386 ;;
+        *) url=$BD_UPDATE_URL/$P_URLPATH/$type/last/boot.tar.xz ;;
         esac
         [[ -n $url ]] || bd_die "no download URL for $variant: set BD_URL_526_AMD64 / BD_URL_526_I386 in $BD_CONF, or pass --file / --img"
         mkdir -p "$BD_USERDATA/system/upgrade"
@@ -631,7 +756,8 @@ cmd_install() {
         [[ -f $file ]] || bd_die "no such file: $file"
         tmp=$(tar -tJf "$file" boot/batocera.board 2>/dev/null) || {
             # old images may not ship batocera.board: only require the squashfs
-            tar -tJf "$file" boot/batocera >/dev/null 2>&1 || bd_die "this does not look like a Batocera boot.tar.xz"; }
+            tar -tJf "$file" boot/batocera >/dev/null 2>&1 || bd_die "this does not look like a Batocera boot.tar.xz"
+        }
         bd_log "extracting into $BD_BOOT_DIR"
         xz -dc <"$file" | tar -xf - -C "$BD_BOOT_DIR" --no-same-owner || bd_die "extraction failed"
     fi
@@ -639,9 +765,13 @@ cmd_install() {
     [[ -f $BD_BOOT_DIR/boot/batocera ]] || bd_die "no boot/batocera in the installed image"
     # 2) the image must really be the variant asked for (board + version), else undo and cancel
     if [[ -f $BD_BOOT_DIR/boot/batocera.board ]]; then
-        b=$(<"$BD_BOOT_DIR/boot/batocera.board"); b=${b//[[:space:]]/}
+        b=$(<"$BD_BOOT_DIR/boot/batocera.board")
+        b=${b//[[:space:]]/}
         for m in $P_BOARDS; do [[ $b == "$m" ]] && ok=1; done
-        if ((!ok)); then rm -rf --one-file-system -- "${BD_BOOT_DIR:?}/boot"; bd_die "image board is '$b', variant $variant expects: $P_BOARDS (image removed)"; fi
+        if ((!ok)); then
+            rm -rf --one-file-system -- "${BD_BOOT_DIR:?}/boot"
+            bd_die "image board is '$b', variant $variant expects: $P_BOARDS (image removed)"
+        fi
     else
         bd_warn "the image has no boot/batocera.board: board not verified"
     fi
@@ -656,7 +786,7 @@ cmd_install() {
     bd_log "make sure BD_VARIANT=$variant is set in $BD_CONF"
 }
 
-cmd_detect() {   # no root needed
+cmd_detect() { # no root needed
     bd_hw_probe
     bd_hw_report
 }
@@ -664,8 +794,15 @@ cmd_detect() {   # no root needed
 cmd_doctor() {
     need_root
     local ok=0 bad=0
-    chk() { if eval "$2" >/dev/null 2>&1; then printf '  [ OK ] %s\n' "$1"; ((ok++)); else printf '  [FAIL] %s\n' "$1"; ((bad++)); fi; }
-    echo "== Tools"; local t
+    chk() { if eval "$2" >/dev/null 2>&1; then
+        printf '  [ OK ] %s\n' "$1"
+        ((ok++))
+    else
+        printf '  [FAIL] %s\n' "$1"
+        ((bad++))
+    fi; }
+    echo "== Tools"
+    local t
     for t in unshare chroot mount losetup flock xz tar curl timeout python3; do chk "$t" "command -v $t"; done
     echo "== Batocera installation ($BD_BOOT_DIR)"
     chk "boot/batocera (squashfs)" "[[ -f $BD_BOOT_DIR/boot/batocera ]]"
@@ -690,8 +827,12 @@ cmd_doctor() {
     echo "== Desktop session (user ${SUDO_USER:-?})"
     local xdg=/run/user/${SUDO_UID:-1000} w f
     w=""
-    for f in "$xdg"/wayland-[0-9]*; do [[ -S $f ]] && { w=${f##*/}; break; }; done
-    if ((P_NESTED)); then chk "Wayland socket (${w:-none})" "[[ -S $xdg/${w:-x} ]]"
+    for f in "$xdg"/wayland-[0-9]*; do [[ -S $f ]] && {
+        w=${f##*/}
+        break
+    }; done
+    if ((P_NESTED)); then
+        chk "Wayland socket (${w:-none})" "[[ -S $xdg/${w:-x} ]]"
     else echo "  ($BD_VARIANT is X11: tty/standalone mode only, no nested window)"; fi
     chk "PipeWire ($xdg/pipewire-0)" "[[ -S $xdg/pipewire-0 ]]"
     chk "PipeWire-Pulse ($xdg/pulse/native)" "[[ -S $xdg/pulse/native ]]"
@@ -737,26 +878,51 @@ cmd_doctor() {
             echo "VER $(cat /usr/share/batocera/batocera.version 2>/dev/null)"' 2>&1)
         while IFS= read -r l; do
             case $l in
-                OK*) printf '  [ OK ] %s\n' "${l#OK }"; ((ok++)) ;;
-                NO*) printf '  [FAIL] %s\n' "${l#NO }"; ((bad++)) ;;
-                *) echo "  $l" ;;
+            OK*)
+                printf '  [ OK ] %s\n' "${l#OK }"
+                ((ok++))
+                ;;
+            NO*)
+                printf '  [FAIL] %s\n' "${l#NO }"
+                ((bad++))
+                ;;
+            *) echo "  $l" ;;
             esac
         done <<<"$out"
     fi
-    echo; echo "Result: $ok OK, $bad failures"
+    echo
+    echo "Result: $ok OK, $bad failures"
     ((bad == 0))
 }
 
 case "${1:-}" in
-    launch)        shift; cmd_launch "$@" ;;
-    run)           cmd_run ;;
-    inner)         cmd_inner ;;
-    shell|enter)   shift; cmd_enter "$@" ;;
-    __enter)       shift; cmd_enter_inner "$@" ;;
-    update)        shift; cmd_update "$@" ;;
-    install)       shift; cmd_install "$@" ;;
-    doctor)        cmd_doctor ;;
-    apply-pending) need_root; bd_boot_apply_pending ;;
-    detect)        cmd_detect ;;
-    *) bd_die "unknown subcommand: ${1:-}" ;;
+launch)
+    shift
+    cmd_launch "$@"
+    ;;
+run) cmd_run ;;
+inner) cmd_inner ;;
+shell | enter)
+    shift
+    cmd_enter "$@"
+    ;;
+__enter)
+    shift
+    cmd_enter_inner "$@"
+    ;;
+update)
+    shift
+    cmd_update "$@"
+    ;;
+install)
+    shift
+    cmd_install "$@"
+    ;;
+doctor) cmd_doctor ;;
+apply-pending)
+    need_root
+    bd_boot_apply_pending
+    ;;
+detect) cmd_detect ;;
+*) bd_die "unknown subcommand: ${1:-}" ;;
 esac
