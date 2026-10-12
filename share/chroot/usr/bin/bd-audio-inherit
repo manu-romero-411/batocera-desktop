@@ -5,10 +5,10 @@
 # them where ES looks (audio.device / audio.profile / audio.volume). The squashfs is untouched.
 export LC_ALL=C
 CONF=/userdata/system/batocera.conf
-log() { echo "bd-audio-inherit: $*"; }
+log() { printf '[%s] bd-audio-inherit: %s\n' "$1" "$2"; }
 
-pactl info >/dev/null 2>&1 || { log "host audio server unreachable (PULSE_SERVER=${PULSE_SERVER:-unset})"; exit 1; }
-[ -e "$CONF" ] || { log "$CONF does not exist yet, nothing to update"; exit 0; }
+pactl info >/dev/null 2>&1 || { log "ERR " "host audio server unreachable (PULSE_SERVER=${PULSE_SERVER:-unset})"; exit 1; }
+[ -e "$CONF" ] || { log INFO "$CONF does not exist yet, nothing to update"; exit 0; }
 
 dev=$(batocera-audio get 2>/dev/null | head -n1 | cut -f1)
 prof=$(batocera-audio get-profile 2>/dev/null | head -n1 | cut -f1)
@@ -18,5 +18,5 @@ mute=$(batocera-audio getSystemMute 2>/dev/null | head -n1)
 [ -n "$dev" ]  && batocera-settings-set audio.device  "$dev"
 [ -n "$prof" ] && batocera-settings-set audio.profile "$prof"
 case "$vol" in ''|*[!0-9]*) ;; *) batocera-settings-set audio.volume "$vol" ;; esac
-log "device=${dev:-?} profile=${prof:-?} volume=${vol:-?} mute=${mute:-?}"
+log " OK " "device=${dev:-?} profile=${prof:-?} volume=${vol:-?} mute=${mute:-?}"
 exit 0

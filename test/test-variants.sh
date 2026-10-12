@@ -2,10 +2,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Eligibility matrix of the four variants against simulated CPUs / GPUs. No root needed.
 set -u
-HERE=$(cd "$(dirname "$0")" && pwd); PFX=$(dirname "$HERE")
+. "$(dirname "$0")/lib.sh"
 . "$PFX/lib/bd-variants.sh"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-pass=0; fail=0
 
 V3F="fpu sse sse2 ssse3 sse4_2 lm avx avx2 bmi1 bmi2 f16c fma abm movbe xsave"
 NOAVX="fpu sse sse2 ssse3 sse4_2 lm"
@@ -36,9 +35,9 @@ expect() {
     for v in "${BD_VARIANTS[@]}"; do
         want=${!i}; ((i++))
         if bd_variant_check "$v"; then got=Y; else got=N; fi
-        if [[ $got == "$want" ]]; then ((pass++)); else ((fail++)); echo "  FAIL $n: $v expected $want got $got ($BD_WHY)"; fi
+        if [[ $got == "$want" ]]; then ((pass++)); else ((fail++)); log_err "$n: $v expected $want got $got ($BD_WHY)" 2>&1; fi
     done
-    echo "  $n -> recommended $(bd_variant_recommend)"
+    log_info "$n -> recommended $(bd_variant_recommend)"
 }
 
 mk haswell   "Intel(R) Core(TM) i5-4590 CPU @ 3.30GHz"        "$V3F"   "8086:0412:i915"
@@ -87,6 +86,5 @@ BD_WEAK_GPU_IDS=" 10de:0421 " expect weaknv N N Y N   # user marked that GeForce
 expect weaknv    N Y N N
 expect nogpu     N Y N N     # no GPU visible, not an Atom -> x86_64
 
-BD_WHY=""; bd_variant_check bogus && { echo "  FAIL bogus accepted"; ((fail++)); } || ((pass++))
-echo "variant tests: $pass passed, $fail failed"
-((fail == 0))
+BD_WHY=""; bd_variant_check bogus && { log_err "bogus variant accepted" 2>&1; ((fail++)); } || ((pass++))
+summary "variant tests"

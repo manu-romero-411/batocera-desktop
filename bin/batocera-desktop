@@ -4,6 +4,8 @@
 # free console (drm, full screen). The privileged part lives in libexec/bd-session.
 set -u
 BD_PREFIX=${BD_PREFIX:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}
+# shellcheck source=../lib/log.sh
+. "$BD_PREFIX/lib/log.sh"
 SESSION="$BD_PREFIX/libexec/bd-session"
 CONF=${BD_CONF:-/etc/batocera-desktop.conf}
 KWIN_SCRIPT_NAME=batocera-desktop-fullscreen
@@ -108,7 +110,7 @@ host_fullscreen_off() {
 cmd=${1:-}; shift || true
 case $cmd in
     start)
-        [[ $EUID -ne 0 ]] || { echo "Run it as your user, not as root." >&2; exit 1; }
+        [[ $EUID -ne 0 ]] || die "run it as your user, not as root"
         XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
         mode=auto; fsopt=$(conf_val BD_FULLSCREEN); fsopt=${fsopt:-auto}
         while (($#)); do
@@ -118,7 +120,7 @@ case $cmd in
                 *) usage; exit 1 ;;
             esac
         done
-        case $mode in auto|nested|drm) ;; *) echo "--mode: auto|nested|drm" >&2; exit 1 ;; esac
+        case $mode in auto|nested|drm) ;; *) die "--mode must be auto, nested or drm" ;; esac
         tty=$(cur_tty || true)
         wl=$(find_wayland || true)
         variant=$(conf_val BD_VARIANT); variant=${variant:-v3}
@@ -126,39 +128,35 @@ case $cmd in
         nested_ok=0; [[ $variant == v3 ]] && nested_ok=1
         if ((!nested_ok)); then
             if [[ $mode == nested ]]; then
-                echo "Variant $variant is an X11 build: nested mode is not available. Use a text console (Ctrl+Alt+F3) or: sudo systemctl start batocera-desktop" >&2; exit 1
+                die "variant $variant is an X11 build: nested mode is not available (use a text console, Ctrl+Alt+F3, or: sudo systemctl start batocera-desktop)"
             fi
             if [[ $mode == auto ]]; then
-                if [[ -n $tty ]]; then mode=drm
-                else
-                    echo "Variant $variant runs full screen on its own console. Run this from a text console (Ctrl+Alt+F3, log in) or use: sudo systemctl start batocera-desktop" >&2; exit 1
-                fi
+                [[ -n $tty ]] || die "variant $variant runs full screen on its own console (run this from a text console, Ctrl+Alt+F3, or use: sudo systemctl start batocera-desktop)"
+                mode=drm
             fi
         fi
         if [[ $mode == auto ]]; then
             # a Wayland session around us wins; X11 is not supported; otherwise a text console -> drm
             if [[ -n $wl ]]; then mode=nested
             elif [[ -n ${DISPLAY:-} ]]; then
-                echo "You are inside an X11 session, which is not supported. Use a Wayland session, or run this from a text console (Ctrl+Alt+F3)." >&2
-                exit 1
+                die "X11 sessions are not supported (use a Wayland session, or run this from a text console, Ctrl+Alt+F3)"
             elif [[ -n $tty ]]; then mode=drm
             else
-                echo "Not in a Wayland session nor on a text console. For an unattended start use: sudo systemctl start batocera-desktop" >&2
-                exit 1
+                die "not in a Wayland session nor on a text console (for an unattended start use: sudo systemctl start batocera-desktop)"
             fi
         fi
         if [[ $mode == drm ]]; then
-            [[ -n $tty ]] || { echo "drm mode must be started from a /dev/ttyN console (Ctrl+Alt+F3, log in)." >&2; exit 1; }
+            [[ -n $tty ]] || die "drm mode must be started from a /dev/ttyN console (Ctrl+Alt+F3, log in)"
             exec sudo -- "$SESSION" launch --mode drm --tty "$tty" --xdg "$XDG_RUNTIME_DIR"
         fi
-        [[ -n $wl ]] || { echo "No Wayland session found (are you on X11?). From a console use --mode drm." >&2; exit 1; }
+        [[ -n $wl ]] || die "no Wayland session found (are you on X11? from a console use --mode drm)"
         args=(--mode nested --xdg "$XDG_RUNTIME_DIR" --wayland "$wl")
         { read -r kl; read -r kv; } < <(xkb)
         args+=(--xkb-layout "$kl" --xkb-variant "$kv")
         fs=""
         if [[ $fsopt != 0 ]]; then
             fs=$(host_fullscreen)
-            [[ -n $fs ]] || echo "Note: could not ask your compositor for fullscreen (supported: KDE, sway, Hyprland); use its fullscreen shortcut on the Batocera window." >&2
+            [[ -n $fs ]] || log_warn "could not ask your compositor for fullscreen (supported: KDE, sway, Hyprland): use its fullscreen shortcut on the Batocera window"
         fi
         args+=(--fullscreen "${fs:-0}")
         # not exec: we undo the compositor rule when Batocera ends

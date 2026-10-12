@@ -12,7 +12,7 @@ export LC_ALL=C
 REAL=${BD_RES_REAL:-/usr/bin/batocera-resolution.real}
 STATE=${BD_RES_STATE:-/run/bd-resolution}
 LOG=/userdata/system/logs/display.log
-_log() { echo "bd-resolution: $*" >> "$LOG" 2>/dev/null; }
+_log() { printf '[INFO] bd-resolution: %s\n' "$*" >> "$LOG" 2>/dev/null; }
 
 PARGS=
 if [ "$1" = "--screen" ]; then PARGS="--screen $2"; shift 2; fi

@@ -2,11 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Variant guards + X11 plumbing, no squashfs needed. Needs root (loop mounts are NOT used here).
 set -u
-HERE=$(cd "$(dirname "$0")" && pwd); PFX=$(dirname "$HERE")
+. "$(dirname "$0")/lib.sh"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-pass=0; fail=0
-ok(){ echo "  PASS $1"; ((pass++)); }; ko(){ echo "  FAIL $1"; ((fail++)); }
-t(){ if eval "$2"; then ok "$1"; else ko "$1"; fi; }
 SESS=$PFX/libexec/bd-session
 
 # fixtures: a plain amd64 machine without GMA (-> x86_64 ok, v3 not), and an Atom N450
@@ -23,7 +20,7 @@ X
 }
 env_for() { echo "BD_TEST=1 BD_CONF=$T/$1.conf BD_CPUINFO=$T/$2 BD_PCI_ROOT=$T/pci BD_UNAME_M=x86_64"; }
 
-echo "== install guard"
+section "install guard"
 mkconf a x86_64
 mkdir -p $T/pkg/boot; echo junk >$T/pkg/boot/batocera; echo x86-64-v3 >$T/pkg/boot/batocera.board
 tar -C $T/pkg -cJf $T/wrong.tar.xz boot
@@ -39,7 +36,7 @@ echo x86_64 >$T/pkg/boot/batocera.board; tar -C $T/pkg -cJf $T/right.tar.xz boot
 t "image with the right board installs and records the variant" \
   "env $(env_for a cpu-plain) $SESS install --variant x86_64 --file $T/right.tar.xz 2>$T/err; [[ \$(cat $T/boot/.bd-variant) == x86_64 ]]"
 
-echo "== start guards"
+section "start guards"
 t "run refuses a variant that does not fit the hardware" \
   "! env $(env_for a cpu-atom) $SESS run 2>$T/err; grep -q 'cannot run on this machine' $T/err"
 mkconf b v3; 
@@ -54,7 +51,7 @@ mkconf c bogus
 t "unknown BD_VARIANT in the config is an error" \
   "! env $(env_for c cpu-plain) $SESS doctor 2>$T/err; grep -q 'unknown BD_VARIANT' $T/err"
 
-echo "== Xorg shim"
+section "Xorg shim"
 mkdir -p $T/root/usr/bin
 printf '#!/bin/sh\necho "REAL:$*"\n' >$T/root/usr/bin/Xorg; chmod +x $T/root/usr/bin/Xorg
 (
@@ -65,12 +62,13 @@ printf '#!/bin/sh\necho "REAL:$*"\n' >$T/root/usr/bin/Xorg; chmod +x $T/root/usr
 ) 2>/dev/null
 t "Xorg is wrapped and the original kept as Xorg.real" "grep -q bd-shim-xorg $T/root/usr/bin/Xorg && grep -q REAL: $T/root/usr/bin/Xorg.real"
 t "VT number written for the shim" "[[ \$(cat $T/root/run/bd-vt) == 9 ]]"
-export BD_XORG_REAL=$T/root/usr/bin/Xorg.real BD_VTFILE=$T/root/run/bd-vt BD_DISPLAY_LOG=$T/disp.log
-t "shim replaces a hard-coded vt1 with our VT" "[[ \$(sh $T/root/usr/bin/Xorg :0 -nolisten tcp vt1 -nocursor) == 'REAL::0 -nolisten tcp -nocursor vt9' ]]"
-t "shim appends our VT when none was given" "[[ \$(sh $T/root/usr/bin/Xorg :1) == 'REAL::1 vt9' ]]"
+export BD_XORG_REAL=$T/root/usr/bin/Xorg.real BD_VTFILE=$T/root/run/bd-vt BD_DISPLAY_LOG=$T/disp.log BD_FORCE_LOGFILE=$T/Xorg.log
+t "shim replaces a hard-coded display and vt1 with :1 and our VT" "[[ \$(sh $T/root/usr/bin/Xorg :0 -nolisten tcp vt1 -nocursor) == 'REAL:-nolisten tcp -nocursor :1 -logfile $T/Xorg.log vt9' ]]"
+t "shim appends display, log file and our VT when none were given" "[[ \$(sh $T/root/usr/bin/Xorg :1) == 'REAL::1 -logfile $T/Xorg.log vt9' ]]"
+t "shim logs what it executes with a level tag" "grep -q '^\[INFO\] bd-xorg: exec ' $T/disp.log"
 
 
-echo "== X11 GPU setup (NVIDIA / AMD / Intel)"
+section "X11 GPU setup (NVIDIA / AMD / Intel)"
 G=$T/gpu; mkdir -p $G/pci/0000:00:02.0 $G/pci/0000:0a:00.0 $G/pci/0000:03:00.0 $G/xdir
 mk_pci() { echo "0x$2" >$G/pci/$1/vendor; echo 0x030000 >$G/pci/$1/class; echo 0x0001 >$G/pci/$1/device; ln -sfn /sys/bus/pci/drivers/$3 $G/pci/$1/driver; }
 mk_pci 0000:00:02.0 8086 i915; mk_pci 0000:0a:00.0 10de nvidia; mk_pci 0000:03:00.0 1002 amdgpu
@@ -93,5 +91,4 @@ t "NVIDIA conf: nvidia driver pinned to its BusID, host module path first, image
 t "AMD pinned: amdgpu driver on its BusID, no NVIDIA module path" \
   "grep -q 'Driver \"amdgpu\"' $G/amd.conf && grep -q 'BusID \"PCI:3:0:0\"' $G/amd.conf && ! grep -q nvidia $G/amd.conf"
 
-echo "x11 tests: $pass passed, $fail failed"
-((fail == 0))
+summary "x11 tests"

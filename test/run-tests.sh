@@ -2,13 +2,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Integration tests against a fake "Batocera" (busybox + squashfs). Needs root, mksquashfs, static busybox.
 set -u
-HERE=$(cd "$(dirname "$0")" && pwd); PFX=$(dirname "$HERE")
+. "$(dirname "$0")/lib.sh"
 T=${TMPDIR:-/tmp}/bdtest; rm -rf "$T"; mkdir -p "$T"/{rootfs,rufo,boot/boot,userdata,xdg,fakehost/lib,logs}
-pass=0; fail=0
-ok(){ echo "  PASS $1"; ((pass++)); }; ko(){ echo "  FAIL $1"; ((fail++)); }
-t(){ if eval "$2"; then ok "$1"; else ko "$1"; fi; }
 
-BB=$(command -v busybox) || { echo "busybox is missing"; exit 2; }
+BB=$(command -v busybox) || { log_err "busybox is missing"; exit 2; }
 R=$T/rootfs
 mkdir -p $R/{bin,sbin,usr/bin,usr/sbin,usr/lib/gbm,usr/share/batocera,etc/init.d,etc/profile.d,run,tmp,proc,sys,dev,boot,userdata,overlay,media,var/lib,usr/share/vulkan/icd.d}
 cp "$BB" $R/bin/busybox
@@ -45,38 +42,21 @@ cat > $R/etc/init.d/S31emulationstation <<'X'
 #!/bin/sh
 case "$1" in
  start) echo start >> /userdata/system/es.log; /usr/bin/labwc-launch </dev/null >/dev/null 2>&1 & ;;
- stop)  echo stop >> /userdata/system/es.log; killall_() { for p in /proc/[0-9]*; do :; done; }; kill $(cat /run/labwc.pid 2>/dev/null) $(cat /run/es.pid 2>/dev/null) 2>/dev/null ;;
+ stop)  echo stop >> /userdata/system/es.log; kill $(cat /run/labwc.pid 2>/dev/null) $(cat /run/es.pid 2>/dev/null) 2>/dev/null ;;
 esac
 X
 cat > $R/usr/bin/labwc-launch <<'X'
 #!/bin/sh
 echo STOCK-LAUNCH > /userdata/system/stock-launch-ran
 X
-cat > $R/usr/bin/labwc <<'X'
-#!/bin/sh
-env > /userdata/system/labwc.env
-echo $$ > /run/labwc.pid
-( exec -a emulationstation /bin/sleep 3000 ) &
-echo $! > /run/es.pid
-exec /bin/sleep 3000
-X
-chmod +x $R/etc/init.d/S* $R/usr/bin/labwc $R/usr/bin/labwc-launch $R/usr/bin/ldconfig
-cp "$BB" $R/usr/bin/labwc-real; 
-cat > $R/usr/bin/labwc <<'X'
-#!/bin/sh
-env > /userdata/system/labwc.env
-cp /bin/busybox /tmp/emulationstation; /tmp/emulationstation sleep 3000 &
-echo $! > /run/es.pid
-exec /bin/busybox sleep 3000
-X
-# trick so that comm is "labwc": run a busybox copy with that name
+# trick so that comm is "labwc" / "emulationstation": run busybox copies with those names
 cat > $R/usr/bin/labwc <<'X'
 #!/bin/sh
 env > /userdata/system/labwc.env
 cp /bin/busybox /tmp/emulationstation; /tmp/emulationstation sleep 3000 &
 cp /bin/busybox /tmp/labwc; exec /tmp/labwc sleep 3000
 X
-chmod +x $R/usr/bin/labwc
+chmod +x $R/etc/init.d/S* $R/usr/bin/labwc $R/usr/bin/labwc-launch $R/usr/bin/ldconfig
 # stock batocera-resolution (kept as .real by the nested shim) and audio tools
 cat > $R/usr/bin/batocera-resolution <<'X'
 #!/bin/sh
@@ -130,6 +110,7 @@ BD_RUN=/run/bdtest
 BD_NVIDIA_VERSION_FILE=$T/fakehost/nvver
 BD_LDCONFIG_P=$T/fakehost/ldc
 BD_BT=off
+BD_VOLUME_KEYS=1
 BD_BIND_MEDIA=0
 BD_BIND_MODULES=0
 BD_START_TIMEOUT=20
@@ -139,7 +120,6 @@ mkdir -p $T/pci; printf 'model name\t: test cpu\nflags\t\t: fpu lm avx avx2 bmi1
 export BD_CPUINFO=$T/cpuinfo BD_PCI_ROOT=$T/pci BD_UNAME_M=x86_64
 export BD_MODE=nested BD_CONF=$T/bd.conf BD_TEST=1 BD_UID=1000 BD_WAYLAND=wayland-0 BD_XDG=$T/xdg
 HOSTNAME_BEFORE=$(hostname)
-mkdir -p /var/run.bdguard-check
 
 start_session(){ "$PFX/libexec/bd-session" run >"$T/logs/run.log" 2>&1 & RUNPID=$!; }
 alive(){ [ -r /proc/$1/stat ] && ! grep -q ') Z' /proc/$1/stat; }
@@ -147,7 +127,7 @@ waitfor(){ for _ in $(seq 100); do eval "$1" && return 0; sleep 0.2; done; retur
 inns(){ # run something inside the session namespace
   local pid; pid=$(pgrep -f '^bash .*/libexec/bd-session inner$' | tail -1); nsenter -t "$pid" -m -p -u -- "$@"; }
 
-echo "== Test 1: startup, layers, environment, NVIDIA"
+section "Test 1: startup, layers, environment, NVIDIA"
 start_session
 t "fake labwc started" "waitfor '[ -s $T/userdata/system/labwc.env ]'"
 t "services started (userdata populated)" "[ -f $T/userdata/system/pop ]"
@@ -173,7 +153,7 @@ t "volume keys added to /etc/default/triggerhappy (image content kept)" "inns ch
 t "audio inherited from host into batocera.conf (volume, device, profile)" "grep -q '^audio.volume=42' $T/userdata/system/batocera.conf && grep -q '^audio.device=fake_sink' $T/userdata/system/batocera.conf && grep -q '^audio.profile=output:stereo@fake_card' $T/userdata/system/batocera.conf"
 t "env: BD_MODE=nested, BD_FULLSCREEN=0" "grep -q '^BD_MODE=nested' $T/userdata/system/labwc.env && grep -q '^BD_FULLSCREEN=0' $T/userdata/system/labwc.env"
 
-echo "== Test 2: shutdown inside ES -> back to desktop, clean"
+section "Test 2: shutdown inside ES -> back to desktop, clean"
 inns chroot /run/bdtest/root /sbin/poweroff
 t "session ends" "waitfor '! alive $RUNPID'"
 t "no orphaned session processes" "! pgrep -f 'busybox sleep 3000|/tmp/labwc' >/dev/null"
@@ -181,9 +161,9 @@ t "S31 stop was invoked" "grep -q stop $T/userdata/system/es.log"
 t "no leftover mounts" "! grep -q bdtest /proc/mounts"
 wait $RUNPID 2>/dev/null
 
-echo "== Test 3: reboot restarts the session and applies a pending update"
+section "Test 3: reboot restarts the session and applies a pending update"
 cp $T/boot/boot/batocera $T/boot/boot/batocera.update
-echo "stale-old" > $T/boot/old-kernel; echo "boot.stale" >/dev/null
+echo "stale-old" > $T/boot/old-kernel
 printf 'old-kernel\n../../etc/passwd\n#c\n\n' > $T/boot/boot.stale
 touch $T/boot/boot/overlay
 rm -f $T/userdata/system/labwc.env
@@ -197,17 +177,17 @@ inns chroot /run/bdtest/root /sbin/reboot
 t "reboot: session restarts (labwc starts again)" "waitfor '[ -s $T/userdata/system/labwc.env ]'"
 t "run process still alive after reboot" "alive $RUNPID"
 
-echo "== Test 4: clean stop via SIGTERM (like systemctl stop)"
+section "Test 4: clean stop via SIGTERM (like systemctl stop)"
 kill -TERM $RUNPID $(pgrep -f '^bash .*/libexec/bd-session inner$') 2>/dev/null
 t "terminates" "waitfor '! alive $RUNPID'"
 t "no leftover mounts" "! grep -q bdtest /proc/mounts"
 t "no orphans" "! pgrep -f 'busybox sleep 3000|/tmp/labwc' >/dev/null"
 
-echo "== Test 5: enter (maintenance) runs a command"
+section "Test 5: enter (maintenance) runs a command"
 t "enter -- cat version" "'$PFX/libexec/bd-session' enter -- /bin/cat /usr/share/batocera/batocera.version | grep -q 44-test"
 
 
-echo "== Test 6: drm mode (stock launcher, key daemon on, no nested shims)"
+section "Test 6: drm mode (stock launcher, key daemon on, no nested shims)"
 rm -f $T/userdata/system/stock-launch-ran $T/userdata/system/thd.log
 BD_MODE=drm BD_TTY=/dev/tty63 start_session
 t "drm: Batocera's own labwc-launch is used" "waitfor '[ -e $T/userdata/system/stock-launch-ran ]'"
@@ -217,7 +197,7 @@ kill -TERM $RUNPID $(pgrep -f '^bash .*/libexec/bd-session inner$') 2>/dev/null
 t "drm: session ends on SIGTERM" "waitfor '! alive $RUNPID'"
 t "drm: no leftover mounts" "! grep -q bdtest /proc/mounts"
 
-echo "== Test 7: launch validation and manual (foreground) start"
+section "Test 7: launch validation and manual (foreground) start"
 L() { SUDO_UID=${U:-1000} "$PFX/libexec/bd-session" launch "$@" >/dev/null 2>&1; }
 mkdir -p /run/user/1000; rm -f /run/user/1000/wayland-0
 python3 -c "import socket;s=socket.socket(socket.AF_UNIX);s.bind('/run/user/1000/wayland-0')"
@@ -239,7 +219,7 @@ t "Ctrl+C (SIGINT) ends it" "waitfor '! alive $RUNPID'"
 t "no leftover mounts" "! grep -q bdtest /proc/mounts"
 rm -f /run/user/1000/wayland-0; rmdir /run/user/1000 2>/dev/null
 
-echo "== Test 8: service start (no BD_MODE): drm on the first free VT"
+section "Test 8: service start (no BD_MODE): drm on the first free VT"
 rm -f $T/userdata/system/stock-launch-ran $T/userdata/system/thd.log
 ( unset BD_MODE BD_TTY; "$PFX/libexec/bd-session" run >"$T/logs/run.log" 2>&1 & echo $! > $T/runpid )
 RUNPID=$(cat $T/runpid)
@@ -249,7 +229,7 @@ kill -TERM $RUNPID $(pgrep -f '^bash .*/libexec/bd-session inner$') 2>/dev/null
 t "service ends on SIGTERM (systemctl stop)" "waitfor '! alive $RUNPID'"
 t "no leftover mounts" "! grep -q bdtest /proc/mounts"
 
-echo "== Test 9: free VT selection"
+section "Test 9: free VT selection"
 mkdir -p $T/fakebin
 cat > $T/fakebin/loginctl <<'X'
 #!/bin/sh
@@ -263,7 +243,7 @@ fv() { PATH=$T/fakebin:$PATH bash -c ". '$PFX/lib/bd-common.sh'; bd_free_vt $1";
 if [ -c /dev/tty4 ]; then
   t "VT with a logind session is skipped (tty3 taken -> tty4)" "[ \"\$(fv 3)\" = 4 ]"
   t "VT held open by a process is skipped" "[ \"\$( (exec 3</dev/tty5; bash -c \". '$PFX/lib/bd-common.sh'; bd_free_vt 5\") )\" != 5 ]"
-else echo "  SKIP no /dev/tty4 in this environment"; fi
+else log_warn "skipped: no /dev/tty4 in this environment"; fi
 
-rmdir /var/run.bdguard-check
-echo; echo "Result: $pass OK, $fail FAILURES"; [ $fail -eq 0 ]
+echo
+summary "Result"

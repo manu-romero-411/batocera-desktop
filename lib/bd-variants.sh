@@ -63,6 +63,13 @@ bd_profile() {
     return 0
 }
 
+# bd_board_matches BOARD -> 0 if BOARD is one of the boards the active variant expects ($P_BOARDS)
+bd_board_matches() {
+    local m
+    for m in $P_BOARDS; do [[ $1 == "$m" ]] && return 0; done
+    return 1
+}
+
 # ------------------------------------------------------------------- hardware probe
 # Test hooks: BD_CPUINFO, BD_PCI_ROOT, BD_UNAME_M (never needed in normal use).
 bd_hw_probe() {

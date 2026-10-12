@@ -1,5 +1,7 @@
 #!/bin/sh
 # bd-shim-xorg
+# batocera-desktop: wraps /usr/bin/Xorg so the server always runs on OUR vt, on display :1 (the
+# host owns :0), with a writable log file. The original server is kept as Xorg.real.
 REAL=${BD_XORG_REAL:-}
 if [ -z "$REAL" ]; then
     if [ -x /usr/bin/Xorg.real ]; then REAL=/usr/bin/Xorg.real
@@ -11,16 +13,16 @@ fi
 VT=$(cat "${BD_VTFILE:-/run/bd-vt}" 2>/dev/null)
 case "$VT" in ''|*[!0-9]*) exec "$REAL" "$@" ;; esac
 
-# Limpiar sockets residuales en el tmpfs del chroot
+# Remove stale sockets left in the chroot's tmpfs
 rm -f /tmp/.X11-unix/X0 /tmp/.X11-unix/X0.lock 2>/dev/null
 rm -f /tmp/.X11-unix/X1 /tmp/.X11-unix/X1.lock 2>/dev/null
 
-# Usar valores forzados por xinit-shim, o valores por defecto
+# Use the values forced by xinit-shim, or the defaults
 DISPLAY_NUM="${BD_FORCE_DISPLAY:-:1}"
 LOGFILE="${BD_FORCE_LOGFILE:-/userdata/system/logs/Xorg.1.log}"
 mkdir -p "$(dirname "$LOGFILE")" 2>/dev/null
 
-# Reconstruir argumentos, eliminando cualquier display, vt o logfile previo
+# Rebuild the arguments, dropping any display, vt or logfile given before
 ARGS=""
 c=$#
 while [ "$c" -gt 0 ]; do
@@ -38,8 +40,9 @@ export DISPLAY="$DISPLAY_NUM"
 
 LOGMAIN="${BD_DISPLAY_LOG:-/userdata/system/logs/display.log}"
 mkdir -p "$(dirname "$LOGMAIN")" 2>/dev/null
-echo "bd-xorg: REAL=$REAL" >> "$LOGMAIN" 2>/dev/null
-echo "bd-xorg: exec $REAL $ARGS $DISPLAY_NUM -logfile $LOGFILE vt$VT" >> "$LOGMAIN" 2>/dev/null
+log() { printf '[%s] bd-xorg: %s\n' "$1" "$2" >>"$LOGMAIN" 2>/dev/null; }
+log INFO "real server: $REAL"
+log INFO "exec $REAL $ARGS $DISPLAY_NUM -logfile $LOGFILE vt$VT"
 
-# ¡CORRECCIÓN CLAVE! Se añade $DISPLAY_NUM explícitamente a la ejecución
+# The display number must be passed explicitly to the real server
 exec "$REAL" $ARGS "$DISPLAY_NUM" -logfile "$LOGFILE" "vt$VT"

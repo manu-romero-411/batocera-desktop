@@ -5,6 +5,7 @@ export LC_ALL=C
 CONF=/userdata/system/.config/labwc
 LOGDIR=/userdata/system/logs
 mkdir -p "$CONF" "$LOGDIR" /var/log
+log() { printf '[%s] bd-labwc-launch: %s\n' "$1" "$2" >>"$LOGDIR/display.log"; }
 
 [ -x /etc/init.d/S14labwc ] && /etc/init.d/S14labwc start
 
@@ -13,13 +14,13 @@ VARIANT=${BD_XKB_VARIANT:-$XKB_DEFAULT_VARIANT}
 [ "$LAYOUT" = "en" ] && LAYOUT=us
 
 {
-echo "XKB_DEFAULT_LAYOUT=$LAYOUT"
-echo "XKB_DEFAULT_VARIANT=$VARIANT"
+    echo "XKB_DEFAULT_LAYOUT=$LAYOUT"
+    echo "XKB_DEFAULT_VARIANT=$VARIANT"
 } > "$CONF/environment"
 
 if [ -z "$BD_HOST_WAYLAND" ]; then
-echo "batocera-desktop: BD_HOST_WAYLAND is empty, no host compositor" >> "$LOGDIR/display.log"
-exit 1
+    log "ERR " "BD_HOST_WAYLAND is empty, no host compositor"
+    exit 1
 fi
 
 HOST_DISPLAY="$BD_HOST_XDG/$BD_HOST_WAYLAND"
@@ -30,30 +31,28 @@ export WLR_BACKENDS=wayland
 export WLR_RENDERER="${BD_WLR_RENDERER:-gles2}"
 export WLR_NO_HARDWARE_CURSORS=1
 
-# FIX CRÍTICO: No forzar WLR_RENDER_DRM_DEVICE en el backend wayland.
-# Hacerlo con el driver propietario de NVIDIA causa un crash inmediato de EGL/libc.
-# Las variables __EGL_VENDOR_LIBRARY_FILENAMES ya garantizan que use NVIDIA.
-# [ -n "$BD_RENDER_NODE" ] && export WLR_RENDER_DRM_DEVICE="$BD_RENDER_NODE"
+# WLR_RENDER_DRM_DEVICE is deliberately NOT set on the wayland backend: with NVIDIA's proprietary
+# driver it crashes EGL/libc at once. __EGL_VENDOR_LIBRARY_FILENAMES already pins NVIDIA.
 
-echo "batocera-desktop: nested labwc in $HOST_DISPLAY  renderer=$WLR_RENDERER node=${BD_RENDER_NODE:-auto} layout=$LAYOUT" >> "$LOGDIR/display.log"
+log INFO "nested labwc in $HOST_DISPLAY renderer=$WLR_RENDERER node=${BD_RENDER_NODE:-auto} layout=$LAYOUT"
 
 if [ "$BD_FULLSCREEN" != 1 ]; then
-(
-export XDG_RUNTIME_DIR=/var/run WAYLAND_DISPLAY=wayland-0
-want=${BD_RESOLUTION:-1920x1080}
-i=0
-while [ $i -lt 100 ]; do
-out=$(wlr-randr 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) ".*/\1/p' | head -n1)
-[ -n "$out" ] && break
-i=$((i + 1)); sleep 0.2
-done
-if [ -n "$out" ]; then
-wlr-randr --output "$out" --custom-mode "$want" >> "$LOGDIR/display.log" 2>&1
-fi
-) &
+    (
+        export XDG_RUNTIME_DIR=/var/run WAYLAND_DISPLAY=wayland-0
+        want=${BD_RESOLUTION:-1920x1080}
+        i=0
+        while [ $i -lt 100 ]; do
+            out=$(wlr-randr 2>/dev/null | sed -n 's/^\([A-Za-z0-9._-]*\) ".*/\1/p' | head -n1)
+            [ -n "$out" ] && break
+            i=$((i + 1)); sleep 0.2
+        done
+        if [ -n "$out" ]; then
+            wlr-randr --output "$out" --custom-mode "$want" >> "$LOGDIR/display.log" 2>&1
+        fi
+    ) &
 fi
 
 if [ "$BD_LABWC_DEBUG" = 1 ]; then DBG=-d; else DBG=; fi
 
-# FIX LOG: Guardar en /userdata (disco real) para que no se borre al petar el tmpfs
+# The log lives in /userdata (real disk) so it survives a crash that wipes the tmpfs
 exec /usr/bin/labwc $DBG -C "$CONF" > "$LOGDIR/labwc.log" 2>&1

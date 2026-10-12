@@ -3,6 +3,8 @@
 # bd-common.sh - shared helpers for batocera-desktop
 # Sourced by libexec/bd-session.
 
+# shellcheck source=log.sh
+. "$(dirname "${BASH_SOURCE[0]}")/log.sh"
 # shellcheck source=bd-variants.sh
 . "$(dirname "${BASH_SOURCE[0]}")/bd-variants.sh"
 
@@ -11,11 +13,7 @@ BD_UNIT=batocera-desktop
 BD_ACTION_FILE=/run/batocera-desktop.action
 BD_LOGDIR=/var/log/batocera-desktop
 
-bd_log()  { printf '[batocera-desktop +%ss] %s\n' "$SECONDS" "$*" >&2; }
-bd_warn() { printf '[batocera-desktop] WARNING: %s\n' "$*" >&2; }
-bd_die()  { printf '[batocera-desktop] ERROR: %s\n' "$*" >&2; exit 1; }
-
-# ------------------------------------------------------------------ config
+# ------------------------------------------------------------------- config
 bd_load_config() {
     if [[ -e $BD_CONF ]]; then
         # the file is executed as root: it must not be writable by anyone else
@@ -23,13 +21,13 @@ bd_load_config() {
             local own perm
             own=$(stat -c %u "$BD_CONF"); perm=$(stat -c %a "$BD_CONF")
             [[ $own -eq 0 && ${perm: -1} != [2367] && ${perm: -2:1} != [2367] ]] \
-                || bd_die "$BD_CONF must be owned by root and not writable by others"
+                || die "$BD_CONF must be owned by root and not writable by others"
         fi
         # shellcheck disable=SC1090
         . "$BD_CONF"
     fi
     : "${BD_VARIANT:=v3}"                   # v3 | x86_64 | 5.26-amd64 | 5.26-i386  (see lib/bd-variants.sh)
-    bd_profile "$BD_VARIANT" || bd_die "unknown BD_VARIANT '$BD_VARIANT' in $BD_CONF (valid: ${BD_VARIANTS[*]})"
+    bd_profile "$BD_VARIANT" || die "unknown BD_VARIANT '$BD_VARIANT' in $BD_CONF (valid: ${BD_VARIANTS[*]})"
     : "${BD_BOOT_DIR:=/boot/batocera}"      # copy of the BATOCERA partition (contains boot/batocera)
     : "${BD_USERDATA:=/batocera}"           # becomes /userdata inside Batocera
     : "${BD_RUN:=/run/batocera-desktop}"
@@ -87,7 +85,7 @@ bd_rpath() {
             ..)   if [[ $cur == */* ]]; then cur=${cur%/*}; else cur=""; fi; continue ;;
         esac
         if [[ -L $root${cur:+/$cur}/$comp ]]; then
-            ((++n > 40)) && { bd_warn "too many symlinks resolving $path"; return 1; }
+            ((++n > 40)) && { log_warn "too many symlinks resolving $path" >&2; return 1; }
             link=$(readlink "$root${cur:+/$cur}/$comp")
             [[ $link == /* ]] && cur=""
             IFS=/ read -r -a lt <<<"${link#/}"
@@ -111,6 +109,12 @@ bd_rleaf() {
 # bd_mkdir PATH_IN_ROOT
 bd_mkdir() { local p; p=$(bd_rpath "$BD_ROOT" "$1") && mkdir -p "$p"; }
 
+# bd_mount_ro SRC DST : read-only bind mount between two host paths (a bind mount only
+# becomes read-only through a second, remount, step).
+bd_mount_ro() {
+    mount --bind "$1" "$2" && mount -o remount,bind,ro "$2"
+}
+
 # bd_bind SRC PATH_IN_ROOT [ro] [rec]
 bd_bind() {
     local src=$1 dst
@@ -121,8 +125,11 @@ bd_bind() {
         mkdir -p "${dst%/*}"
         [[ -e $dst ]] || : >"$dst"
     fi
-    if [[ ${4:-} == rec ]]; then mount --rbind "$src" "$dst" || return 1
-    else mount --bind "$src" "$dst" || return 1; fi
+    if [[ ${4:-} == rec ]]; then
+        mount --rbind "$src" "$dst" || return 1
+    else
+        mount --bind "$src" "$dst" || return 1
+    fi
     if [[ ${3:-} == ro ]]; then mount -o remount,bind,ro "$dst" || return 1; fi
 }
 
@@ -150,8 +157,8 @@ bd_boot_apply_pending() {
     [[ -d $b/boot ]] || return 0
     for img in batocera rufomaculata; do
         if [[ -e $b/boot/$img.update ]]; then
-            bd_log "applying pending update: boot/$img.update"
-            mv -f -- "$b/boot/$img.update" "$b/boot/$img" || bd_die "cannot replace boot/$img"
+            log_info "applying pending update: boot/$img.update"
+            mv -f -- "$b/boot/$img.update" "$b/boot/$img" || die "cannot replace boot/$img"
             # like the initrd: the saved overlay is discarded on update
             if [[ -e $b/boot/overlay ]]; then mv -f -- "$b/boot/overlay" "$b/boot/overlay.old"; fi
         fi
@@ -160,10 +167,10 @@ bd_boot_apply_pending() {
         while IFS= read -r p || [[ -n $p ]]; do
             case $p in ''|\#*|overlays/mipi-panel.dtbo) continue ;; esac
             case $p in
-                /*|.|..|../*|*/..|*/../*|./*) bd_warn "unsafe 'stale' path ignored: $p"; continue ;;
+                /*|.|..|../*|*/..|*/../*|./*) log_warn "unsafe 'stale' path ignored: $p"; continue ;;
             esac
             if [[ -e $b/$p || -L $b/$p ]]; then
-                bd_log "removing stale file: $p"
+                log_info "removing stale file: $p"
                 rm -rf -- "${b:?}/$p"
             fi
         done <"$b/boot.stale"
@@ -171,37 +178,33 @@ bd_boot_apply_pending() {
     fi
 }
 
+# bd_shim_install TARGET SHIM [MARKER] [optional]
+# Replaces TARGET (a path inside the chroot) with share/chroot/SHIM and keeps the original as
+# TARGET.real, unless TARGET already is our shim (identified by MARKER, e.g. after a saved overlay).
+# With "optional", nothing happens when TARGET does not exist.
+bd_shim_install() {
+    local target=$1 shim=$2 marker=${3:-} opt=${4:-} leaf
+    leaf=$(bd_rleaf "$BD_ROOT" "$target") || return 1
+    if [[ -e $leaf || -L $leaf ]]; then
+        if [[ -z $marker ]] || ! grep -qs "$marker" "$leaf"; then
+            rm -f -- "$leaf.real"
+            cp -a -- "$leaf" "$leaf.real" || return 1
+        fi
+    elif [[ $opt == optional ]]; then
+        return 0
+    fi
+    bd_put "$BD_PREFIX/share/chroot/$shim" "$target" 0755
+}
+
 # X11 variants: Xorg must run on OUR vt. Wrap the server (see share/chroot/usr/bin/Xorg-shim).
 bd_inject_xorg() {
-  local l_xorg l_x l_xinit
-  [[ -n ${BD_TTY:-} ]] && echo "${BD_TTY#/dev/tty}" >"$(bd_rpath "$BD_ROOT" /run)/bd-vt" || true
+    [[ -n ${BD_TTY:-} ]] && echo "${BD_TTY#/dev/tty}" >"$(bd_rpath "$BD_ROOT" /run)/bd-vt"
 
-  # Shim /usr/bin/Xorg
-  l_xorg=$(bd_rleaf "$BD_ROOT" /usr/bin/Xorg)
-  if [[ -e $l_xorg || -L $l_xorg ]]; then
-    if ! grep -qs bd-shim-xorg "$l_xorg" 2>/dev/null; then
-      rm -f -- "$l_xorg.real"; cp -a -- "$l_xorg" "$l_xorg.real" || return 1
-    fi
-    bd_put "$BD_PREFIX/share/chroot/usr/bin/Xorg-shim" /usr/bin/Xorg 0755
-  fi
-
-  # Shim /usr/bin/X (Debian symlink to Xorg.wrap)
-  l_x=$(bd_rleaf "$BD_ROOT" /usr/bin/X)
-  if [[ -e $l_x || -L $l_x ]]; then
-    if ! grep -qs bd-shim-xorg "$l_x" 2>/dev/null; then
-      rm -f -- "$l_x.real"; cp -a -- "$l_x" "$l_x.real" || true
-    fi
-    bd_put "$BD_PREFIX/share/chroot/usr/bin/Xorg-shim" /usr/bin/X 0755
-  fi
-
-  # Shim /usr/bin/xinit (CRÍTICO: el padre xinit también debe saber que usamos :1)
-  l_xinit=$(bd_rleaf "$BD_ROOT" /usr/bin/xinit)
-  if [[ -e $l_xinit || -L $l_xinit ]]; then
-    if ! grep -qs bd-shim-xinit "$l_xinit" 2>/dev/null; then
-      rm -f -- "$l_xinit.real"; cp -a -- "$l_xinit" "$l_xinit.real" || true
-    fi
-    bd_put "$BD_PREFIX/share/chroot/usr/bin/xinit-shim" /usr/bin/xinit 0755
-  fi
+    bd_shim_install /usr/bin/Xorg usr/bin/Xorg-shim bd-shim-xorg optional || return 1
+    # Debian's /usr/bin/X is a symlink to Xorg.wrap
+    bd_shim_install /usr/bin/X usr/bin/Xorg-shim bd-shim-xorg optional || log_warn "could not wrap /usr/bin/X"
+    # The parent xinit must know about our display (:1) too
+    bd_shim_install /usr/bin/xinit usr/bin/xinit-shim bd-shim-xinit optional || log_warn "could not wrap /usr/bin/xinit"
 }
 
 # 5.26 talks to ALSA directly. If the image has the ALSA->Pulse plugin, route it to the host's
@@ -213,7 +216,7 @@ bd_inject_alsa_pulse() {
     if ls "$p"/libasound_module_pcm_pulse.so >/dev/null 2>&1; then
         printf 'pcm.!default { type pulse }\nctl.!default { type pulse }\n' >"$(bd_rleaf "$BD_ROOT" /etc/asound.conf)"
     else
-        bd_warn "this ${BD_VARIANT} image has no ALSA pulse plugin: it will use ALSA directly and may fight the host for the sound card (set BD_AUDIO=none, or release the card on the host)"
+        log_warn "this ${BD_VARIANT} image has no ALSA pulse plugin: it will use ALSA directly and may fight the host for the sound card (set BD_AUDIO=none, or release the card on the host)"
     fi
 }
 
@@ -284,8 +287,7 @@ bd_nvidia_stage() {
         if [[ -z ${idxof[$dir]:-} ]]; then
             idxof[$dir]=$i; dirs+=("$dir")
             mkdir -p "$S/host/$i"
-            mount --bind "$dir" "$S/host/$i" && mount -o remount,bind,ro "$S/host/$i" \
-                || { bd_warn "cannot mount $dir"; return 1; }
+            bd_mount_ro "$dir" "$S/host/$i" || { log_warn "cannot mount $dir"; return 1; }
             ((++i))
         fi
         ln -sfn "/run/bd-nvidia/host/${idxof[$dir]}/${real##*/}" "$S/lib64/$base"
@@ -324,7 +326,7 @@ EOF
     if [[ -n $icd ]]; then
         sed -E 's#("library_path"[[:space:]]*:[[:space:]]*)"[^"]*"#\1"libGLX_nvidia.so.0"#' "$icd" >"$S/nvidia_icd.json"
     else
-        bd_warn "nvidia_icd.json not found on the host; generating a minimal one"
+        log_warn "nvidia_icd.json not found on the host; generating a minimal one"
         printf '{"file_format_version":"1.0.0","ICD":{"library_path":"libGLX_nvidia.so.0","api_version":"1.3.0"}}\n' >"$S/nvidia_icd.json"
     fi
     if [[ -d $(bd_rpath "$BD_ROOT" /usr/share/vulkan/icd.d) ]]; then
@@ -389,8 +391,7 @@ bd_nvidia_xstage() {
     for f in "$NV_XDRV:nvidia_drv.so" "$NV_XGLX:libglxserver_nvidia.so"; do
         x=${f%%:*}; name=${f##*:}; dir=${x%/*}
         mkdir -p "$S/xhost/$i"
-        mount --bind "$dir" "$S/xhost/$i" && mount -o remount,bind,ro "$S/xhost/$i" \
-            || { bd_warn "cannot mount $dir"; return 1; }
+        bd_mount_ro "$dir" "$S/xhost/$i" || { log_warn "cannot mount $dir"; return 1; }
         ln -sfn "/run/bd-nvidia/xhost/$i/${x##*/}" "$S/xorg/$name"
         ((++i))
     done
@@ -408,8 +409,8 @@ bd_x11_gpu_conf() {
     else
         return 0      # Intel / AMD / anything open: let Xorg autodetect with the image's own drivers
     fi
-    [[ -z $bus || $bus =~ ^PCI:[0-9]+:[0-9]+:[0-9]+$ ]] || { bd_warn "BD_X11_BUSID '$bus' is not PCI:bus:dev:func: ignored"; bus=""; }
-    [[ $drv =~ ^[A-Za-z0-9_]+$ ]] || { bd_warn "invalid BD_X11_DRIVER '$drv'"; return 1; }
+    [[ -z $bus || $bus =~ ^PCI:[0-9]+:[0-9]+:[0-9]+$ ]] || { log_warn "BD_X11_BUSID '$bus' is not PCI:bus:dev:func: ignored"; bus=""; }
+    [[ $drv =~ ^[A-Za-z0-9_]+$ ]] || { log_warn "invalid BD_X11_DRIVER '$drv'"; return 1; }
     mkdir -p "$(dirname "$out")"
     {
         echo "# generated by batocera-desktop on every start"
@@ -425,19 +426,19 @@ bd_x11_gpu_conf() {
 
 # --------------------------------------------------------------- utilities
 bd_chroot_proc() {   # is there a process with that comm inside the chroot?
-local p c r alts name=${1:0:15}
-# X11: nuestro shim hace exec Xorg.real, asi que el comm del kernel nunca es
-# "Xorg"; Debian ademas tiene Xorg.wrap. Aceptamos todos los nombres posibles.
-alts=" $name "
-[[ $name == Xorg ]] && alts=" Xorg Xorg.real Xorg.wrap Xorg.wrap.real X "
-for p in "$BD_ROOT"/proc/[0-9]*; do
-[[ -r $p/comm ]] || continue
-read -r c <"$p/comm" 2>/dev/null || continue
-[[ $alts == *" $c "* ]] || continue
-r=$(readlink "$p/root" 2>/dev/null) || continue
-[[ $r == "$BD_ROOT" ]] && return 0
-done
-return 1
+    local p c r alts name=${1:0:15}
+    # X11: our shim execs Xorg.real, so the kernel's comm is never "Xorg" (and Debian also has
+    # Xorg.wrap). Accept every name the server can show up as.
+    alts=" $name "
+    [[ $name == Xorg ]] && alts=" Xorg Xorg.real Xorg.wrap Xorg.wrap.real X "
+    for p in "$BD_ROOT"/proc/[0-9]*; do
+        [[ -r $p/comm ]] || continue
+        read -r c <"$p/comm" 2>/dev/null || continue
+        [[ $alts == *" $c "* ]] || continue
+        r=$(readlink "$p/root" 2>/dev/null) || continue
+        [[ $r == "$BD_ROOT" ]] && return 0
+    done
+    return 1
 }
 
 bd_kill_chroot_procs() {   # signal
@@ -505,7 +506,7 @@ bd_default_user() {
         u=${d##*/}
         [[ $u -ge 1000 ]] && { id -nu "$u" 2>/dev/null && return 0; }
     done
-    getent passwd 1000 | cut -d: -f1 | grep . 
+    getent passwd 1000 | cut -d: -f1 | grep .
 }
 
 # Makes sure the user's runtime dir and PipeWire-Pulse socket exist (service start, maybe no login).

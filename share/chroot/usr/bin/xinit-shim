@@ -1,15 +1,15 @@
 #!/bin/sh
 # bd-shim-xinit
-# Fuerza a xinit a usar el display :1 para evitar colisión con el :0 del host
-# y asegura que el shim del servidor X reciba los argumentos correctos.
+# batocera-desktop: forces xinit onto display :1 to avoid clashing with the host's :0, and makes
+# sure the X server shim (Xorg-shim) receives the right arguments.
 
 REAL=${BD_XINIT_REAL:-/usr/bin/xinit.real}
 if [ ! -x "$REAL" ]; then REAL=/usr/bin/xinit; fi
 
-# Forzar DISPLAY para xinit y sus procesos hijos
+# Force DISPLAY for xinit and its children
 export DISPLAY=":1"
 
-# Verificar si ya hay un display en los argumentos
+# Is there already a display among the arguments?
 HAS_DISPLAY=0
 ARGS=""
 for a in "$@"; do
@@ -19,18 +19,18 @@ for a in "$@"; do
     ARGS="$ARGS $a"
 done
 
-# Si no se especificó display, xinit usa :0 por defecto. Lo cambiamos a :1.
 if [ $HAS_DISPLAY -eq 0 ]; then
+    # No display given: xinit would default to :0, so switch it to :1
     case "$ARGS" in
         *--*) ARGS=$(echo "$ARGS" | sed 's/--/-- :1 /') ;;
         *) ARGS="$ARGS :1" ;;
     esac
 else
-    # Reemplazar :0 por :1 en los argumentos existentes
+    # Replace :0 with :1 in the existing arguments
     ARGS=$(echo "$ARGS" | sed 's/ :0 / :1 /g; s/ :0$/ :1/')
 fi
 
-# Indicar al Xorg-shim que debe forzar :1 y un archivo de log escribible
+# Tell Xorg-shim to force :1 and a writable log file
 export BD_FORCE_DISPLAY=":1"
 export BD_FORCE_LOGFILE="/userdata/system/logs/Xorg.1.log"
 
