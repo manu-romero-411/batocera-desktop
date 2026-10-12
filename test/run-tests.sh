@@ -288,5 +288,25 @@ waitfor '! alive $RUNPID'; wait $RUNPID 2>/dev/null
 echo "BD_CAN_SHUTDOWN=maybe" >> $T/bd-cs.conf
 t "invalid BD_CAN_SHUTDOWN is rejected" "! BD_CONF=$T/bd-cs.conf '$PFX/libexec/bd-session' run >/dev/null 2>&1"
 
+section "Test 11: 'batocera-desktop start' mode selection (fake sudo and bd-session)"
+CP=$T/cli; rm -rf $CP; mkdir -p $CP/libexec $CP/fb $CP/out; chmod 777 $CP/out   # the fake bd-session runs as uid 1000
+ln -s $PFX/lib $CP/lib; ln -s $PFX/bin $CP/bin
+printf '#!/bin/sh\necho "$*" > %s/cli.out\n' "$CP/out" > $CP/libexec/bd-session; chmod +x $CP/libexec/bd-session
+printf '#!/bin/sh\n[ "$1" = -- ] && shift\nexec "$@"\n' > $CP/fb/sudo; chmod +x $CP/fb/sudo
+cli(){ # cli VARIANT TTY WAYLAND_DISPLAY DISPLAY [args] -> prints what `launch` received
+  local v=$1 tt=$2 wd=$3 dp=$4; shift 4
+  printf 'BD_VARIANT=%s\n' "$v" > $CP/c.conf; rm -f $CP/out/cli.out
+  env -u WAYLAND_DISPLAY -u DISPLAY BD_PREFIX=$CP BD_CONF=$CP/c.conf PATH=$CP/fb:$PATH XDG_RUNTIME_DIR=$T/xdg \
+      ${tt:+BD_TTY=$tt} ${wd:+WAYLAND_DISPLAY=$wd} ${dp:+DISPLAY=$dp} setpriv --reuid=1000 --regid=1000 --clear-groups \
+      "$CP/bin/batocera-desktop" start "$@" >/dev/null 2>&1; cat $CP/out/cli.out 2>/dev/null
+}
+t "console + Wayland desktop on another VT (v3) -> drm on this tty" "cli v3 /dev/tty3 wayland-0 '' | grep -q -- '--mode drm --tty /dev/tty3'"
+t "console + stale DISPLAY (v3) -> drm on this tty" "cli v3 /dev/tty3 '' :0 | grep -q -- '--mode drm --tty /dev/tty3'"
+t "console + X11 build + Wayland desktop elsewhere -> drm" "cli x86_64 /dev/tty4 wayland-0 '' | grep -q -- '--mode drm --tty /dev/tty4'"
+t "plain console, nothing else -> drm" "cli v3 /dev/tty3 '' '' | grep -q -- '--mode drm --tty /dev/tty3'"
+t "terminal (no tty) inside Wayland -> nested" "cli v3 '' wayland-0 '' | grep -q -- '--mode nested'"
+t "terminal (no tty) inside X11 -> refused" "[ -z \"\$(cli v3 '' '' :0)\" ]"
+t "explicit --mode nested from a console still nests" "cli v3 /dev/tty3 wayland-0 '' --mode nested | grep -q -- '--mode nested'"
+
 echo
 summary "Result"

@@ -16,9 +16,10 @@ Usage: batocera-desktop <command>
 
   start [--mode auto|nested|drm] [--windowed]
         Run Batocera now, in this terminal. Ctrl+C (or ES "Shutdown") ends it.
-          * inside a Wayland session  -> nested: a fullscreen window of your desktop
-                                         (Alt+Tab back to the desktop)
-          * on a text console, no Wayland/X11 -> drm: full screen, owns the displays
+          * on a text console (/dev/ttyN)       -> drm: full screen on that very console, owns the
+                                                   displays (even if a Wayland/X11 desktop runs on another VT)
+          * in a terminal inside a Wayland session -> nested: a fullscreen window of your desktop
+                                                   (Alt+Tab back to the desktop)
         --windowed     nested: do not ask the host compositor for fullscreen
   detect           What this machine is and which Batocera variants it may install (no sudo)
   doctor           Full diagnostics (asks for sudo)
@@ -136,11 +137,14 @@ case $cmd in
             fi
         fi
         if [[ $mode == auto ]]; then
-            # a Wayland session around us wins; X11 is not supported; otherwise a text console -> drm
-            if [[ -n $wl ]]; then mode=nested
+            # A real console (/dev/ttyN) always runs full screen on that very VT (drm), whatever desktop,
+            # Wayland or X11, the user has on another VT: its socket (found in the shared runtime dir) or a
+            # stale DISPLAY is not something to nest into. Nesting is for a terminal emulator (a pty)
+            # inside a Wayland session; X11 is not supported.
+            if [[ -n $tty ]]; then mode=drm
+            elif [[ -n $wl ]]; then mode=nested
             elif [[ -n ${DISPLAY:-} ]]; then
                 die "X11 sessions are not supported (use a Wayland session, or run this from a text console, Ctrl+Alt+F3)"
-            elif [[ -n $tty ]]; then mode=drm
             else
                 die "not in a Wayland session nor on a text console (for an unattended start use: sudo systemctl start batocera-desktop)"
             fi
