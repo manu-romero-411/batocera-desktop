@@ -90,13 +90,13 @@ bd_hw_probe() {
         [[ $cls == 0x03* ]] || continue
         v=${v#0x}; id=${id#0x}; drv=""
         [[ -L $d/driver ]] && drv=$(basename "$(readlink "$d/driver")")
-        ((HW_GPU_COUNT++))
+        ((++HW_GPU_COUNT))
         if [[ $v == 8086 && ( $BD_GMA_IDS == *" $id "* || $drv == gma500_gfx ) ]]; then
             HW_GMA=1; HW_GMA_DEVS+="$v:$id "; HW_GPUS+="$v:$id(GMA) "
         elif [[ $BD_WEAK_GPU_IDS == *" $v:$id "* ]]; then
             HW_GPUS+="$v:$id(weak) "
         else
-            ((HW_CAPABLE_GPUS++)); HW_GPUS+="$v:$id "
+            ((++HW_CAPABLE_GPUS)); HW_GPUS+="$v:$id "
             case $v in 10de) HW_NVIDIA=1 ;; 1002) HW_AMD=1 ;; 8086) HW_INTEL_OK=1 ;; esac
         fi
     done

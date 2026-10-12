@@ -1,0 +1,37 @@
+#!/bin/sh
+# bd-shim-xinit
+# Fuerza a xinit a usar el display :1 para evitar colisión con el :0 del host
+# y asegura que el shim del servidor X reciba los argumentos correctos.
+
+REAL=${BD_XINIT_REAL:-/usr/bin/xinit.real}
+if [ ! -x "$REAL" ]; then REAL=/usr/bin/xinit; fi
+
+# Forzar DISPLAY para xinit y sus procesos hijos
+export DISPLAY=":1"
+
+# Verificar si ya hay un display en los argumentos
+HAS_DISPLAY=0
+ARGS=""
+for a in "$@"; do
+    case "$a" in
+        :0|:1|:2|:3|:4|:5|:6|:7|:8|:9) HAS_DISPLAY=1 ;;
+    esac
+    ARGS="$ARGS $a"
+done
+
+# Si no se especificó display, xinit usa :0 por defecto. Lo cambiamos a :1.
+if [ $HAS_DISPLAY -eq 0 ]; then
+    case "$ARGS" in
+        *--*) ARGS=$(echo "$ARGS" | sed 's/--/-- :1 /') ;;
+        *) ARGS="$ARGS :1" ;;
+    esac
+else
+    # Reemplazar :0 por :1 en los argumentos existentes
+    ARGS=$(echo "$ARGS" | sed 's/ :0 / :1 /g; s/ :0$/ :1/')
+fi
+
+# Indicar al Xorg-shim que debe forzar :1 y un archivo de log escribible
+export BD_FORCE_DISPLAY=":1"
+export BD_FORCE_LOGFILE="/userdata/system/logs/Xorg.1.log"
+
+exec "$REAL" $ARGS

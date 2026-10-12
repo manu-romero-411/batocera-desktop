@@ -173,16 +173,35 @@ bd_boot_apply_pending() {
 
 # X11 variants: Xorg must run on OUR vt. Wrap the server (see share/chroot/usr/bin/Xorg-shim).
 bd_inject_xorg() {
-    local l
-    [[ -n ${BD_TTY:-} ]] && echo "${BD_TTY#/dev/tty}" >"$(bd_rpath "$BD_ROOT" /run)/bd-vt"
-    l=$(bd_rleaf "$BD_ROOT" /usr/bin/Xorg)
-    if [[ ! -e $l && ! -L $l ]]; then
-        bd_warn "no /usr/bin/Xorg in this image: X11 start-up will fail (run: batocera-desktop doctor)"; return 0
-    fi
-    if ! grep -qs bd-shim-xorg "$l" 2>/dev/null; then     # not already our shim (e.g. saved overlay)
-        rm -f -- "$l.real"; cp -a -- "$l" "$l.real" || return 1
+  local l_xorg l_x l_xinit
+  [[ -n ${BD_TTY:-} ]] && echo "${BD_TTY#/dev/tty}" >"$(bd_rpath "$BD_ROOT" /run)/bd-vt" || true
+
+  # Shim /usr/bin/Xorg
+  l_xorg=$(bd_rleaf "$BD_ROOT" /usr/bin/Xorg)
+  if [[ -e $l_xorg || -L $l_xorg ]]; then
+    if ! grep -qs bd-shim-xorg "$l_xorg" 2>/dev/null; then
+      rm -f -- "$l_xorg.real"; cp -a -- "$l_xorg" "$l_xorg.real" || return 1
     fi
     bd_put "$BD_PREFIX/share/chroot/usr/bin/Xorg-shim" /usr/bin/Xorg 0755
+  fi
+
+  # Shim /usr/bin/X (Debian symlink to Xorg.wrap)
+  l_x=$(bd_rleaf "$BD_ROOT" /usr/bin/X)
+  if [[ -e $l_x || -L $l_x ]]; then
+    if ! grep -qs bd-shim-xorg "$l_x" 2>/dev/null; then
+      rm -f -- "$l_x.real"; cp -a -- "$l_x" "$l_x.real" || true
+    fi
+    bd_put "$BD_PREFIX/share/chroot/usr/bin/Xorg-shim" /usr/bin/X 0755
+  fi
+
+  # Shim /usr/bin/xinit (CRÍTICO: el padre xinit también debe saber que usamos :1)
+  l_xinit=$(bd_rleaf "$BD_ROOT" /usr/bin/xinit)
+  if [[ -e $l_xinit || -L $l_xinit ]]; then
+    if ! grep -qs bd-shim-xinit "$l_xinit" 2>/dev/null; then
+      rm -f -- "$l_xinit.real"; cp -a -- "$l_xinit" "$l_xinit.real" || true
+    fi
+    bd_put "$BD_PREFIX/share/chroot/usr/bin/xinit-shim" /usr/bin/xinit 0755
+  fi
 }
 
 # 5.26 talks to ALSA directly. If the image has the ALSA->Pulse plugin, route it to the host's
@@ -267,7 +286,7 @@ bd_nvidia_stage() {
             mkdir -p "$S/host/$i"
             mount --bind "$dir" "$S/host/$i" && mount -o remount,bind,ro "$S/host/$i" \
                 || { bd_warn "cannot mount $dir"; return 1; }
-            ((i++))
+            ((++i))
         fi
         ln -sfn "/run/bd-nvidia/host/${idxof[$dir]}/${real##*/}" "$S/lib64/$base"
     done
@@ -373,7 +392,7 @@ bd_nvidia_xstage() {
         mount --bind "$dir" "$S/xhost/$i" && mount -o remount,bind,ro "$S/xhost/$i" \
             || { bd_warn "cannot mount $dir"; return 1; }
         ln -sfn "/run/bd-nvidia/xhost/$i/${x##*/}" "$S/xorg/$name"
-        ((i++))
+        ((++i))
     done
 }
 
@@ -406,15 +425,18 @@ bd_x11_gpu_conf() {
 
 # --------------------------------------------------------------- utilities
 bd_chroot_proc() {   # is there a process with that comm inside the chroot?
-    local p c r name=${1:0:15}
-    for p in "$BD_ROOT"/proc/[0-9]*; do
-        [[ -r $p/comm ]] || continue
-        read -r c <"$p/comm" 2>/dev/null || continue
-        [[ $c == "$name" ]] || continue
-        r=$(readlink "$p/root" 2>/dev/null) || continue
-        [[ $r == "$BD_ROOT" ]] && return 0
-    done
-    return 1
+  local p c r name=${1:0:15} alts=" $1 "
+  # X11: Xorg-shim does `exec Xorg.real`, so the kernel comm is "Xorg.real", never "Xorg".
+  # Debian's wrapper and the unwrapped binaries have their own names too.
+  [[ $name == Xorg ]] && alts=" Xorg Xorg.real Xorg.wrap Xorg.wrap.real X.real "
+  for p in "$BD_ROOT"/proc/[0-9]*; do
+    [[ -r $p/comm ]] || continue
+    read -r c <"$p/comm" 2>/dev/null || continue
+    [[ $alts == *" $c "* ]] || continue
+    r=$(readlink "$p/root" 2>/dev/null) || continue
+    [[ $r == "$BD_ROOT" ]] && return 0
+  done
+  return 1
 }
 
 bd_kill_chroot_procs() {   # signal

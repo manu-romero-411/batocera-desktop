@@ -20,6 +20,7 @@ BD_STOP=0
 BD_ACTION="exit"
 BD_RC=0
 BD_ENV=()
+DISPLAY=:1
 
 need_root() { [[ $EUID -eq 0 ]] || bd_die "must run as root (sudo)"; }
 
@@ -345,6 +346,9 @@ bd_build_env() {
         PATH=/usr/bin:/usr/sbin:/bin:/sbin
         HOME=/userdata/system
         TERM="${TERM:-linux}"
+DISPLAY=:1
+DISPLAY=:1
+        DISPLAY=:1
         BD_SESSION=1
         BD_MODE="${BD_MODE:-nested}"
         BD_HOST_XDG=/run/host-xdg
@@ -422,24 +426,55 @@ bd_bt_stop() {
 }
 
 # ---------------------------------------------------------------------- main loop
+bd_diag_procs() {   # why did the session end? list what is (not) running in the chroot
+    local p c a r f=$BD_LOGDIR/session-diag.log
+    {
+        echo "=== $(date '+%F %T') $1"
+        for p in "$BD_ROOT"/proc/[0-9]*; do
+            r=$(readlink "$p/root" 2>/dev/null) || continue
+            [[ $r == "$BD_ROOT" ]] || continue
+            read -r c <"$p/comm" 2>/dev/null || continue
+            a=$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null)
+            echo "  ${p##*/} comm=$c cmd=${a:0:200}"
+        done
+    } >>"$f" 2>&1
+    bd_log "process list saved in $f"
+}
+
 bd_wait_session() {
-    local t=0 seen=0 miss=0
-    while ((!BD_STOP)); do
-        if bd_chroot_proc "$P_COMP"; then
-            ((seen)) || bd_log "$P_COMP is up"
-            seen=1
-        elif ((seen)); then
-            bd_log "the display server ($P_COMP) was closed"; break
-        elif ((++t > BD_START_TIMEOUT)); then
-            bd_warn "$P_COMP did not start within ${BD_START_TIMEOUT}s; see /userdata/system/logs/display.log and /var/log/{labwc,Xorg.0}.log inside Batocera"
-            BD_RC=1; break
-        fi
-        if ((seen)); then
-            if bd_chroot_proc emulationstation; then miss=0
-            elif ((++miss >= 15)); then bd_log "EmulationStation has exited"; break; fi
-        fi
-        sleep 1 & wait $!
-    done
+local t=0 seen=0 miss=0 xgone=0
+while ((!BD_STOP)); do
+if bd_chroot_proc "$P_COMP"; then
+((seen)) || bd_log "$P_COMP is up"
+((xgone)) && bd_log "$P_COMP is back"
+seen=1; xgone=0
+elif ((seen)); then
+if [[ $P_DISPLAY == x11 ]]; then
+# X11: el supervisor stock (emulationstation-standalone) relanza Xorg y ES por
+# su cuenta; ausencias breves son normales. Solo una ausencia larga significa
+# que murio todo el stack (supervisor incluido).
+((xgone == 1)) && bd_log "$P_COMP is gone (X11: waiting for the standalone loop to respawn it)"
+((++xgone >= 15)) && { bd_log "the display server ($P_COMP) has been down for ${xgone}s: X11 stack dead"; bd_diag_procs "$P_COMP gone"; break; }
+else
+bd_log "the display server ($P_COMP) was closed"; bd_diag_procs "$P_COMP gone"; break
+fi
+elif ((++t > BD_START_TIMEOUT)); then
+bd_warn "$P_COMP did not start within ${BD_START_TIMEOUT}s; see /userdata/system/logs/display.log and /var/log/{labwc,Xorg.0}.log inside Batocera"
+BD_RC=1; break
+fi
+if ((seen)); then
+if bd_chroot_proc emulationstation; then
+miss=0
+elif [[ $P_DISPLAY == x11 ]]; then
+# X11: ES puede estar en crash-loop bajo el supervisor stock: avisar una vez y
+# NO matar la sesion (el supervisor sigue reintentando y puede recuperarse).
+((++miss == 5)) && bd_warn "EmulationStation no se ve vivo (crash loop?): revisa /userdata/system/logs/es_log.txt y display.log; la sesion X11 se mantiene viva"
+else
+((++miss >= 15)) && { bd_log "EmulationStation has exited"; bd_diag_procs "ES missing (X seen)"; break; }
+fi
+fi
+sleep 1 & wait $!
+done
 }
 
 # Audio: Batocera's own tools (batocera-audio, pactl) talk to the HOST's PipeWire-Pulse through

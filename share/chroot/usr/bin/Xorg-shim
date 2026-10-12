@@ -1,16 +1,45 @@
 #!/bin/sh
 # bd-shim-xorg
-# batocera-desktop: replaces /usr/bin/Xorg in the X11 variants (the original is kept as Xorg.real).
-# Whatever launches X (xinit/startx/emulationstation-standalone), the server must run on the VT that
-# batocera-desktop owns, not on a hard-coded one (usually vt1, which would steal the host's console).
-REAL=${BD_XORG_REAL:-/usr/bin/Xorg.real}
+REAL=${BD_XORG_REAL:-}
+if [ -z "$REAL" ]; then
+    if [ -x /usr/bin/Xorg.real ]; then REAL=/usr/bin/Xorg.real
+    elif [ -x /usr/bin/X.real ]; then REAL=/usr/bin/X.real
+    elif [ -x /usr/bin/Xorg.wrap.real ]; then REAL=/usr/bin/Xorg.wrap.real
+    else REAL=/usr/bin/Xorg; fi
+fi
+
 VT=$(cat "${BD_VTFILE:-/run/bd-vt}" 2>/dev/null)
 case "$VT" in ''|*[!0-9]*) exec "$REAL" "$@" ;; esac
+
+# Limpiar sockets residuales en el tmpfs del chroot
+rm -f /tmp/.X11-unix/X0 /tmp/.X11-unix/X0.lock 2>/dev/null
+rm -f /tmp/.X11-unix/X1 /tmp/.X11-unix/X1.lock 2>/dev/null
+
+# Usar valores forzados por xinit-shim, o valores por defecto
+DISPLAY_NUM="${BD_FORCE_DISPLAY:-:1}"
+LOGFILE="${BD_FORCE_LOGFILE:-/userdata/system/logs/Xorg.1.log}"
+mkdir -p "$(dirname "$LOGFILE")" 2>/dev/null
+
+# Reconstruir argumentos, eliminando cualquier display, vt o logfile previo
+ARGS=""
 c=$#
-while [ "$c" -gt 0 ]; do          # drop any vtN argument the caller passed
-    a=$1; shift
-    case "$a" in vt[0-9]*) ;; *) set -- "$@" "$a" ;; esac
-    c=$((c - 1))
+while [ "$c" -gt 0 ]; do
+  a=$1; shift
+  case "$a" in
+    :0|:1|:2|:3|:4|:5|:6|:7|:8|:9) ;;
+    vt[0-9]*) ;;
+    -logfile) shift; c=$((c-1)) ;;
+    *) ARGS="$ARGS $a" ;;
+  esac
+  c=$((c - 1))
 done
-echo "bd-xorg: $* vt$VT" >> "${BD_DISPLAY_LOG:-/userdata/system/logs/display.log}" 2>/dev/null
-exec "$REAL" "$@" "vt$VT"
+
+export DISPLAY="$DISPLAY_NUM"
+
+LOGMAIN="${BD_DISPLAY_LOG:-/userdata/system/logs/display.log}"
+mkdir -p "$(dirname "$LOGMAIN")" 2>/dev/null
+echo "bd-xorg: REAL=$REAL" >> "$LOGMAIN" 2>/dev/null
+echo "bd-xorg: exec $REAL $ARGS $DISPLAY_NUM -logfile $LOGFILE vt$VT" >> "$LOGMAIN" 2>/dev/null
+
+# ¡CORRECCIÓN CLAVE! Se añade $DISPLAY_NUM explícitamente a la ejecución
+exec "$REAL" $ARGS "$DISPLAY_NUM" -logfile "$LOGFILE" "vt$VT"
