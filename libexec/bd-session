@@ -365,6 +365,8 @@ bd_inject_files() {
         bd_shim_install /usr/bin/batocera-resolution usr/bin/batocera-resolution bd-shim-resolution || return 1
         echo "$BD_RESOLUTION" >"$(bd_rpath "$BD_ROOT" /run)/bd-resolution"
     fi
+    bd_inject_vt_file
+    bd_inject_volume_gate || log_warn "could not install the volume gate: volume keys may act twice while the desktop is in front"
     # drm/tty mode uses Batocera's own launcher and batocera-resolution (real KMS output)
     if [[ $P_DISPLAY == x11 ]]; then
         bd_inject_xorg || return 1

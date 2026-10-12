@@ -59,6 +59,7 @@ bd_load_config() {
     : "${BD_TRIGGERHAPPY:=auto}"            # auto (drm only) | 1 | 0   - key daemon inside Batocera
     : "${BD_VOLUME_KEYS:=auto}"             # add volume/mute keys to triggerhappy: auto (only if hotkeygen is not started) | 1 | 0
     : "${BD_VOLUME_STEP:=5}"
+    : "${BD_VOLUME_GATE:=1}"                # drm: ignore Batocera's volume keys while its VT is not the active one
     : "${BD_XKB_LAYOUT:=}"
     : "${BD_XKB_VARIANT:=}"
     : "${BD_NVIDIA_HOST_EGL_PLATFORM:=0}"   # 1 = also use the host's libnvidia-egl-*
@@ -196,10 +197,24 @@ bd_shim_install() {
     bd_put "$BD_PREFIX/share/chroot/$shim" "$target" 0755
 }
 
+# Tells the chroot which VT it owns (/run/bd-vt holds the number). Used by Xorg-shim to start the
+# server on our VT and by the batocera-audio shim to know when Batocera is the visible session.
+bd_inject_vt_file() {
+    [[ -n ${BD_TTY:-} ]] || return 0
+    echo "${BD_TTY#/dev/tty}" >"$(bd_rpath "$BD_ROOT" /run)/bd-vt"
+}
+
+# drm mode: Batocera's key daemons (hotkeygen, triggerhappy) read /dev/input directly, whatever VT
+# is in front, and act on the HOST's PipeWire. With the desktop on another VT its own volume
+# handler would fire too, so every key press changed the volume twice. The shim drops
+# `batocera-audio setSystemVolume` while our VT is not the active one.
+bd_inject_volume_gate() {
+    [[ ${BD_MODE:-nested} == drm && $BD_VOLUME_GATE == 1 && -n ${BD_TTY:-} ]] || return 0
+    bd_shim_install /usr/bin/batocera-audio usr/bin/batocera-audio bd-shim-audio optional
+}
+
 # X11 variants: Xorg must run on OUR vt. Wrap the server (see share/chroot/usr/bin/Xorg-shim).
 bd_inject_xorg() {
-    [[ -n ${BD_TTY:-} ]] && echo "${BD_TTY#/dev/tty}" >"$(bd_rpath "$BD_ROOT" /run)/bd-vt"
-
     bd_shim_install /usr/bin/Xorg usr/bin/Xorg-shim bd-shim-xorg optional || return 1
     # Debian's /usr/bin/X is a symlink to Xorg.wrap
     bd_shim_install /usr/bin/X usr/bin/Xorg-shim bd-shim-xorg optional || log_warn "could not wrap /usr/bin/X"

@@ -57,6 +57,7 @@ printf '#!/bin/sh\necho "REAL:$*"\n' >$T/root/usr/bin/Xorg; chmod +x $T/root/usr
 (
   BD_PREFIX=$PFX; . "$PFX/lib/bd-common.sh"
   BD_ROOT=$T/root; BD_TTY=/dev/tty9; BD_AUDIO=none; mkdir -p $T/root/run
+  bd_inject_vt_file
   bd_inject_xorg
   bd_inject_xorg                      # twice: the original must not be lost (saved overlay case)
 ) 2>/dev/null

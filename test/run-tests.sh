@@ -74,6 +74,7 @@ case "$1" in
   get-profile) printf 'output:stereo@fake_card\tStereo\n' ;;
   getSystemVolume) echo 42 ;;
   getSystemMute) echo no ;;
+  setSystemVolume) echo "$*" >> /userdata/system/vol.log ;;
 esac
 X
 cat > $R/usr/bin/batocera-settings-set <<'X'
@@ -151,6 +152,7 @@ t "nested: triggerhappy NOT started (the host desktop handles keys)" "[ ! -e $T/
 t "nested: batocera-resolution shim installed, original kept as .real" "inns chroot /run/bdtest/root /bin/sh -c 'grep -q bd-shim-resolution /usr/bin/batocera-resolution && /usr/bin/batocera-resolution.real' | grep -q STOCKRES"
 t "volume keys added to /etc/default/triggerhappy (image content kept)" "inns chroot /run/bdtest/root /bin/cat /etc/default/triggerhappy | grep -q 'setSystemVolume +5' && inns chroot /run/bdtest/root /bin/cat /etc/default/triggerhappy | grep -q 'image default'"
 t "audio inherited from host into batocera.conf (volume, device, profile)" "grep -q '^audio.volume=42' $T/userdata/system/batocera.conf && grep -q '^audio.device=fake_sink' $T/userdata/system/batocera.conf && grep -q '^audio.profile=output:stereo@fake_card' $T/userdata/system/batocera.conf"
+t "nested: batocera-audio is not wrapped (no VT gate)" "! inns chroot /run/bdtest/root /bin/sh -c 'grep -q bd-shim-audio /usr/bin/batocera-audio'"
 t "env: BD_MODE=nested, BD_FULLSCREEN=0" "grep -q '^BD_MODE=nested' $T/userdata/system/labwc.env && grep -q '^BD_FULLSCREEN=0' $T/userdata/system/labwc.env"
 
 section "Test 2: shutdown inside ES -> back to desktop, clean"
@@ -193,6 +195,15 @@ BD_MODE=drm BD_TTY=/dev/tty63 start_session
 t "drm: Batocera's own labwc-launch is used" "waitfor '[ -e $T/userdata/system/stock-launch-ran ]'"
 t "drm: triggerhappy started (volume keys work on a bare console)" "grep -q start $T/userdata/system/thd.log"
 t "drm: batocera-resolution not replaced" "! inns chroot /run/bdtest/root /bin/sh -c 'grep -q bd-shim-resolution /usr/bin/batocera-resolution'"
+# volume gate: key actions only count while Batocera's VT (63 here) is the active one
+vol() { inns chroot /run/bdtest/root /bin/sh -c "echo $1 > /tmp/active; BD_ACTIVE_VT_FILE=/tmp/active /usr/bin/batocera-audio setSystemVolume +5"; }
+rm -f $T/userdata/system/vol.log
+t "drm: VT file written for the shims" "[ \"\$(inns chroot /run/bdtest/root /bin/cat /run/bd-vt)\" = 63 ]"
+vol tty1
+t "drm: volume key ignored while the desktop VT is active" "[ ! -e $T/userdata/system/vol.log ]"
+vol tty63
+t "drm: volume key applied while Batocera's VT is active" "grep -q 'setSystemVolume +5' $T/userdata/system/vol.log"
+t "drm: other batocera-audio calls pass through the gate" "[ \"\$(inns chroot /run/bdtest/root /usr/bin/batocera-audio getSystemVolume)\" = 42 ]"
 kill -TERM $RUNPID $(pgrep -f '^bash .*/libexec/bd-session inner$') 2>/dev/null
 t "drm: session ends on SIGTERM" "waitfor '! alive $RUNPID'"
 t "drm: no leftover mounts" "! grep -q bdtest /proc/mounts"

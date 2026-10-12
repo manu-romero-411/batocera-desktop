@@ -1,0 +1,25 @@
+#!/bin/sh
+# bd-shim-audio
+# batocera-desktop (drm mode): wraps batocera-audio so that volume key actions are ignored while
+# Batocera's VT is not the one on screen. Batocera's key daemons read /dev/input directly and
+# change the HOST's volume; with the desktop in front, the desktop changes it as well (double step).
+# Only `setSystemVolume` (what the key daemons run) is gated; everything else, and any call made
+# while Batocera is in front, goes straight to the original.
+REAL=${BD_AUDIO_REAL:-/usr/bin/batocera-audio.real}
+VTFILE=${BD_VTFILE:-/run/bd-vt}
+ACTIVE=${BD_ACTIVE_VT_FILE:-/sys/class/tty/tty0/active}
+LOG=/userdata/system/logs/display.log
+
+if [ "$1" = setSystemVolume ]; then
+    VT=$(cat "$VTFILE" 2>/dev/null)
+    CUR=$(cat "$ACTIVE" 2>/dev/null)
+    case "$VT" in ''|*[!0-9]*) ;; *)
+        case "$CUR" in tty[0-9]*)
+            if [ "$CUR" != "tty$VT" ]; then
+                printf '[INFO] bd-audio: "%s" ignored (Batocera is on tty%s, the active VT is %s)\n' "$*" "$VT" "$CUR" >>"$LOG" 2>/dev/null
+                exit 0
+            fi ;;
+        esac ;;
+    esac
+fi
+exec "$REAL" "$@"
