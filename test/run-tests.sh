@@ -115,7 +115,9 @@ BD_VOLUME_KEYS=1
 BD_BIND_MEDIA=0
 BD_BIND_MODULES=0
 BD_START_TIMEOUT=20
+BD_PULSE_COOKIE=$T/pulse-cookie
 X
+printf 'cookie-bytes\n' > $T/pulse-cookie
 # the suite must not depend on the machine's CPU: pretend to be an AVX2 machine, variant v3
 mkdir -p $T/pci; printf 'model name\t: test cpu\nflags\t\t: fpu lm avx avx2 bmi1 bmi2 f16c fma abm movbe xsave\n' > $T/cpuinfo
 export BD_CPUINFO=$T/cpuinfo BD_PCI_ROOT=$T/pci BD_UNAME_M=x86_64
@@ -136,6 +138,9 @@ t "stock labwc-launch replaced (nested)" "[ ! -e $T/userdata/system/stock-launch
 t "env: WLR_BACKENDS=wayland" "grep -q '^WLR_BACKENDS=wayland' $T/userdata/system/labwc.env"
 t "env: WAYLAND_DISPLAY points to the host" "grep -q '^WAYLAND_DISPLAY=/run/host-xdg/wayland-0' $T/userdata/system/labwc.env"
 t "env: PULSE_SERVER of the host" "grep -q '^PULSE_SERVER=unix:/run/host-xdg/pulse/native' $T/userdata/system/labwc.env"
+t "env: PULSE_COOKIE points to the handed-over cookie" "grep -q '^PULSE_COOKIE=/run/host-pulse-cookie' $T/userdata/system/labwc.env"
+t "PulseAudio cookie visible inside the chroot, same content" "[ \"\$(inns chroot /run/bdtest/root /bin/cat /run/host-pulse-cookie)\" = cookie-bytes ]"
+t "PulseAudio cookie is read-only inside the chroot" "! inns chroot /run/bdtest/root /bin/sh -c 'echo x >> /run/host-pulse-cookie' 2>/dev/null"
 t "env: EGL vendor is nvidia only" "grep -q '^__EGL_VENDOR_LIBRARY_FILENAMES=/run/bd-nvidia/10_nvidia.json' $T/userdata/system/labwc.env"
 t "ldconfig ran after linking NVIDIA libs" "inns chroot /run/bdtest/root /bin/cat /var/log/ldconfig.test | grep -q libGLX_nvidia.so.0"
 t "soname symlink libEGL_nvidia.so.0 resolves to the host lib" "inns chroot /run/bdtest/root /bin/sh -c 'cat /usr/lib/libEGL_nvidia.so.0' | grep -q fake"
@@ -327,6 +332,17 @@ t "--tty wins over the shell's own console" "cli v3 /dev/tty3 '' '' --tty 8 | gr
 t "--tty rejects non-numbers" "[ -z \"\$(cli v3 '' '' '' --tty ../x)\" ] && [ -z \"\$(cli v3 '' '' '' --tty 0)\" ]"
 t "X11 build without a console nor --tty -> refused" "[ -z \"\$(cli x86_64 '' wayland-0 '')\" ]"
 t "--mode is gone (redundant with --tty)" "[ -z \"\$(cli v3 /dev/tty3 '' '' --mode drm)\" ]"
+
+section "Test 12: PulseAudio cookie lookup"
+mkdir -p $T/home/.config/pulse $T/home2
+pc(){ ( . "$PFX/lib/bd-common.sh"; BD_PULSE_COOKIE=${1:-}; getent(){ [ "$2" = 1234 ] && echo "u:x:1234:1234::${HOME_FAKE}:/bin/sh"; }; bd_pulse_cookie "$2" ); }
+printf c > $T/home/.config/pulse/cookie
+t "cookie found in ~/.config/pulse/cookie of the user" "[ \"\$(HOME_FAKE=$T/home pc '' 1234)\" = $T/home/.config/pulse/cookie ]"
+printf c > $T/home2/.pulse-cookie
+t "legacy ~/.pulse-cookie is the fallback" "[ \"\$(HOME_FAKE=$T/home2 pc '' 1234)\" = $T/home2/.pulse-cookie ]"
+t "no cookie (PipeWire setups) -> none, not an error for the session" "! HOME_FAKE=$T/nohome pc '' 1234"
+t "BD_PULSE_COOKIE overrides the lookup" "[ \"\$(HOME_FAKE=$T/home pc $T/pulse-cookie 1234)\" = $T/pulse-cookie ]"
+t "BD_PULSE_COOKIE pointing nowhere -> none" "! HOME_FAKE=$T/home pc $T/nope 1234"
 
 echo
 summary "Result"

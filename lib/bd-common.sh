@@ -62,6 +62,7 @@ bd_load_config() {
     : "${BD_FULLSCREEN:=auto}"              # nested: ask the host compositor for a fullscreen window (auto|1|0)
     : "${BD_HOST_WINDOW_CLASS:=wlroots}"    # app_id wlroots gives its nested window (used for host window rules)
     : "${BD_AUDIO_SYNC:=1}"                 # inherit the host's audio device/profile/volume at start
+    : "${BD_PULSE_COOKIE:=}"                # PulseAudio (not PipeWire) auth cookie; empty = the desktop user's own
     : "${BD_TRIGGERHAPPY:=auto}"            # auto (drm only) | 1 | 0   - key daemon inside Batocera
     : "${BD_VOLUME_KEYS:=auto}"             # add volume/mute keys to triggerhappy: auto (only if hotkeygen is not started) | 1 | 0
     : "${BD_VOLUME_STEP:=5}"
@@ -543,6 +544,24 @@ bd_ensure_user_runtime() {
         for i in $(seq 25); do [[ -S /run/user/$uid/pulse/native ]] && break; sleep 0.2; done
     fi
     return 0
+}
+
+# bd_pulse_cookie UID -> prints the PulseAudio auth cookie to hand to the chroot (BD_PULSE_COOKIE, else
+# the user's ~/.config/pulse/cookie or ~/.pulse-cookie); fails if there is none. A PulseAudio server,
+# unlike pipewire-pulse, only lets another uid in with that cookie, and everything inside Batocera is root.
+bd_pulse_cookie() {
+    local home c
+    if [[ -n $BD_PULSE_COOKIE ]]; then
+        [[ -r $BD_PULSE_COOKIE ]] || return 1
+        printf '%s\n' "$BD_PULSE_COOKIE"
+        return 0
+    fi
+    home=$(getent passwd "$1" 2>/dev/null | cut -d: -f6)
+    [[ -n $home ]] || return 1
+    for c in "$home/.config/pulse/cookie" "$home/.pulse-cookie"; do
+        [[ -f $c ]] && { printf '%s\n' "$c"; return 0; }
+    done
+    return 1
 }
 
 # bd_find_service NAME -> the init script to run. Batocera renumbers some services between

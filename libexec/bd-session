@@ -22,6 +22,7 @@ BD_ACTION="exit"
 BD_RC=0
 BD_HOST_DOWN=0
 BD_OWNVT=0
+BD_COOKIE_BOUND=0
 BD_ENV=()
 BD_UNSHARE=()
 DISPLAY=:1
@@ -292,7 +293,7 @@ bd_mount_layers() {
 }
 
 bd_mount_runtime() {
-    local R=$BD_ROOT P S spec src dst opt
+    local R=$BD_ROOT P S spec src dst opt ck
     mkdir -p "$BD_USERDATA"
     bd_bind "$BD_BOOT_DIR" /boot || return 1
     bd_bind "$BD_USERDATA" /userdata || return 1
@@ -322,6 +323,12 @@ bd_mount_runtime() {
     [[ -e $(bd_rpath "$R" /var/run) ]] || bd_ln /var/run /run
     [[ -d /run/udev ]] && bd_bind /run/udev /run/udev ro # libudev/SDL: gamepad classification from the host
     if [[ -n ${BD_XDG:-} && -d $BD_XDG ]]; then bd_bind "$BD_XDG" /run/host-xdg; fi
+    # PulseAudio (not PipeWire) refuses root without the user's cookie: hand it over, read-only
+    BD_COOKIE_BOUND=0
+    if [[ $BD_AUDIO == host && -n ${BD_XDG:-} ]] && ck=$(bd_pulse_cookie "${BD_UID:-}"); then
+        if bd_bind "$ck" /run/host-pulse-cookie ro; then BD_COOKIE_BOUND=1
+        else log_warn "could not bind the PulseAudio cookie $ck"; fi
+    fi
     case $BD_BT in
     host)
         [[ -S /run/dbus/system_bus_socket ]] && bd_bind /run/dbus/system_bus_socket /run/dbus/system_bus_socket
@@ -453,6 +460,7 @@ bd_build_env() {
     [[ -n $BD_RENDER_NODE ]] && BD_ENV+=("BD_RENDER_NODE=$BD_RENDER_NODE")
     if [[ $BD_AUDIO == host && -n ${BD_XDG:-} ]]; then
         BD_ENV+=(PULSE_SERVER=unix:/run/host-xdg/pulse/native PIPEWIRE_RUNTIME_DIR=/run/host-xdg)
+        ((BD_COOKIE_BOUND)) && BD_ENV+=(PULSE_COOKIE=/run/host-pulse-cookie)
     fi
     if [[ ${BD_MODE:-nested} == drm && $P_DISPLAY == wayland ]]; then
         [[ -n $BD_DRM_DEVICES ]] && BD_ENV+=(WLR_DRM_DEVICES="$BD_DRM_DEVICES")
@@ -817,7 +825,7 @@ cmd_detect() { # no root needed
 
 cmd_doctor() {
     need_root
-    local ok=0 bad=0
+    local ok=0 bad=0 ck
     chk_pass() {
         log_ok "$1"
         ((ok++))
@@ -890,6 +898,10 @@ cmd_doctor() {
     fi
     echo "== Audio / keys"
     chk "audio mode: $BD_AUDIO, sync with host: $BD_AUDIO_SYNC" "[[ $BD_AUDIO == host ]]"
+    if [[ $BD_AUDIO == host ]]; then
+        if ck=$(bd_pulse_cookie "${BD_UID:-}"); then log_info "PulseAudio cookie handed to Batocera: $ck (needed only with PulseAudio, not PipeWire)"
+        else log_info "no PulseAudio cookie found (fine with PipeWire; with PulseAudio Batocera will get 'Access denied': set BD_PULSE_COOKIE)"; fi
+    fi
     log_info "triggerhappy: $BD_TRIGGERHAPPY (auto = drm only), volume keys: $BD_VOLUME_KEYS (step $BD_VOLUME_STEP)"
     echo "== Gamepads"
     chk "/dev/uinput" "[[ -e /dev/uinput ]]"

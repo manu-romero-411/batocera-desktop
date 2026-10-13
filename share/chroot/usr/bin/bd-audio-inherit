@@ -7,7 +7,10 @@ export LC_ALL=C
 CONF=/userdata/system/batocera.conf
 log() { printf '[%s] bd-audio-inherit: %s\n' "$1" "$2"; }
 
-pactl info >/dev/null 2>&1 || { log "ERR " "host audio server unreachable (PULSE_SERVER=${PULSE_SERVER:-unset})"; exit 1; }
+err=$(pactl info 2>&1 >/dev/null) || {
+    log "ERR " "host audio server unreachable (PULSE_SERVER=${PULSE_SERVER:-unset} PULSE_COOKIE=${PULSE_COOKIE:-unset}): $(printf '%s' "$err" | head -n1)"
+    exit 1
+}
 [ -e "$CONF" ] || { log INFO "$CONF does not exist yet, nothing to update"; exit 0; }
 
 dev=$(batocera-audio get 2>/dev/null | head -n1 | cut -f1)
