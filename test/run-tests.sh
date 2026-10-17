@@ -89,6 +89,8 @@ X
 chmod +x $R/usr/bin/batocera-resolution $R/usr/bin/pactl $R/usr/bin/batocera-audio $R/usr/bin/batocera-settings-set $R/usr/bin/batocera-brightness
 mkdir -p $R/etc/default
 echo "# image default" > $R/etc/default/triggerhappy
+mkdir -p $R/etc/hotkeygen
+printf '{\n  "KEY_PAUSE":            "pause",\n  "KEY_VOLUMEUP":         "volumeup",\n  "KEY_VOLUMEDOWN":       "volumedown",\n  "KEY_MUTE":             "volumemute",\n  "KEY_BRIGHTNESS_CYCLE": "brightness-cycle",\n  "KEY_ATTENDANT_OFF":    "recording-stop"\n}\n' > $R/etc/hotkeygen/default_mapping.conf
 mkdir -p $R/usr/share/rufo; echo rufo > $R/usr/share/rufo/marker
 mksquashfs $R $T/boot/boot/batocera -quiet -noappend >/dev/null
 mkdir -p $T/rufo/usr/share/rufo; echo rufo > $T/rufo/usr/share/rufo/marker
@@ -116,7 +118,6 @@ BD_RUN=/run/bdtest
 BD_NVIDIA_VERSION_FILE=$T/fakehost/nvver
 BD_LDCONFIG_P=$T/fakehost/ldc
 BD_BT=off
-BD_VOLUME_KEYS=1
 BD_BIND_MEDIA=0
 BD_BIND_MODULES=0
 BD_START_TIMEOUT=20
@@ -161,10 +162,10 @@ t "session mounts NOT visible on the host" "! grep -q bdtest /proc/mounts"
 
 t "nested: triggerhappy NOT started (the host desktop handles keys)" "[ ! -e $T/userdata/system/thd.log ]"
 t "nested: batocera-resolution shim installed, original kept as .real" "inns chroot /run/bdtest/root /bin/sh -c 'grep -q bd-shim-resolution /usr/bin/batocera-resolution && /usr/bin/batocera-resolution.real' | grep -q STOCKRES"
-t "volume keys added to /etc/default/triggerhappy (image content kept)" "inns chroot /run/bdtest/root /bin/cat /etc/default/triggerhappy | grep -q 'setSystemVolume +5' && inns chroot /run/bdtest/root /bin/cat /etc/default/triggerhappy | grep -q 'image default'"
+t "nested: no key map added (triggerhappy is off, the host handles the volume keys)" "! inns chroot /run/bdtest/root /bin/cat /etc/default/triggerhappy | grep -q bd-key-act && inns chroot /run/bdtest/root /bin/cat /etc/default/triggerhappy | grep -q 'image default'"
+t "nested: hotkeygen keeps its image mapping" "inns chroot /run/bdtest/root /bin/grep -q KEY_VOLUMEUP /etc/hotkeygen/default_mapping.conf"
 t "audio inherited from host into batocera.conf (volume, device, profile)" "grep -q '^audio.volume=42' $T/userdata/system/batocera.conf && grep -q '^audio.device=fake_sink' $T/userdata/system/batocera.conf && grep -q '^audio.profile=output:stereo@fake_card' $T/userdata/system/batocera.conf"
 t "nested: batocera-audio is not wrapped (no VT gate)" "! inns chroot /run/bdtest/root /bin/sh -c 'grep -q bd-shim-audio /usr/bin/batocera-audio'"
-t "no warning about volume keys when the user has no key map" "! grep -q 'maps the volume keys' $T/logs/run.log"
 t "nested: batocera-brightness is not wrapped (no VT gate)" "! inns chroot /run/bdtest/root /bin/sh -c 'grep -q bd-shim-brightness /usr/bin/batocera-brightness'"
 t "resolv.conf inside is a link to the session's copy of the host's" "[ \"\$(inns chroot /run/bdtest/root /bin/readlink /etc/resolv.conf)\" = /run/host-resolv.conf ] && [ \"\$(inns chroot /run/bdtest/root /bin/cat /etc/resolv.conf)\" = \"\$(cat /etc/resolv.conf)\" ]"
 t "env: BD_MODE=nested, BD_FULLSCREEN=0" "grep -q '^BD_MODE=nested' $T/userdata/system/labwc.env && grep -q '^BD_FULLSCREEN=0' $T/userdata/system/labwc.env"
@@ -210,8 +211,12 @@ mkdir -p $T/userdata/system/configs
 printf 'KEY_VOLUMEUP\t\t1amixer set Master 5%%+\n#KEY_MUTE 1 x\nKEY_F2+KEY_LEFTMETA\t1batocera-brightness cycle\n' > $T/userdata/system/configs/multimedia_keys.conf
 BD_MODE=drm BD_TTY=/dev/tty63 start_session
 t "drm: Batocera's own labwc-launch is used" "waitfor '[ -e $T/userdata/system/stock-launch-ran ]'"
-t "drm: warns when the user's multimedia_keys.conf maps the volume keys next to hotkeygen" "grep -q 'maps the volume keys' $T/logs/run.log"
-rm -f $T/userdata/system/configs/multimedia_keys.conf
+t "drm: hotkeygen's volume keys removed, the rest of its mapping kept and valid" "inns chroot /run/bdtest/root /bin/sh -c 'F=/etc/hotkeygen/default_mapping.conf; ! grep -qE \"VOLUME|KEY_MUTE\" \$F && grep -q KEY_PAUSE \$F && grep -q KEY_BRIGHTNESS_CYCLE \$F && python3 -c \"import json,sys; json.load(open(sys.argv[1]))\" \$F || ! command -v python3 >/dev/null'"
+t "drm: image's hotkeygen mapping untouched (only the writable layer changed)" "unsquashfs -cat $T/boot/boot/batocera etc/hotkeygen/default_mapping.conf | grep -q KEY_VOLUMEUP"
+KM=$(inns chroot /run/bdtest/root /bin/cat /etc/default/triggerhappy)
+t "drm: volume keys bound on press and on repeat" "echo '$KM' | grep -q 'bd_bind KEY_VOLUMEUP .*setSystemVolume +5.*setSystemVolume +3'"
+t "drm: brightness keys bound" "echo '$KM' | grep -q 'bd_bind KEY_BRIGHTNESSUP .*batocera-brightness + 5'"
+t "drm: the user's KEY_VOLUMEUP line is respected, the rest is added" "inns chroot /run/bdtest/root /bin/sh -c 'CONFPATH=/userdata/system/configs/multimedia_keys.conf PIDFILE=/x; . /etc/default/triggerhappy; cat /run/bd-multimedia_keys.conf' | tee $T/km.out | grep -q amixer && ! grep -q 'KEY_VOLUMEUP 1' $T/km.out && grep -q 'KEY_VOLUMEDOWN 2' $T/km.out && grep -q 'KEY_MUTE 1' $T/km.out"
 t "drm: triggerhappy started (volume keys work on a bare console)" "grep -q start $T/userdata/system/thd.log"
 t "drm: batocera-resolution not replaced" "! inns chroot /run/bdtest/root /bin/sh -c 'grep -q bd-shim-resolution /usr/bin/batocera-resolution'"
 # volume gate: key actions only count while Batocera's VT (63 here) is the active one
@@ -231,6 +236,13 @@ t "drm: brightness change ignored while the desktop VT is active" "[ ! -e $T/use
 bri tty63
 t "drm: brightness change applied while Batocera's VT is active" "grep -q 'cycle' $T/userdata/system/bri.log"
 t "drm: reading the brightness (no arguments) passes through the gate" "[ \"\$(inns chroot /run/bdtest/root /usr/bin/batocera-brightness)\" = 50 ]"
+# bd-key-act: held key = repeats dropped while the previous action runs; a dead owner's lock is taken over
+KA=/usr/bin/bd-key-act; rm -f $T/userdata/system/ka.log
+inns chroot /run/bdtest/root /bin/sh -c "$KA t /bin/sh -c 'echo run >> /userdata/system/ka.log; sleep 1' & sleep 0.3; $KA t /bin/sh -c 'echo dropped >> /userdata/system/ka.log'; wait"
+t "bd-key-act: an event during a running action is dropped" "[ \"\$(cat $T/userdata/system/ka.log)\" = run ]"
+inns chroot /run/bdtest/root /bin/sh -c "ln -s 999999 /run/bd-key-t.lock; $KA t /bin/sh -c 'echo after-crash >> /userdata/system/ka.log'; [ ! -L /run/bd-key-t.lock ]"
+t "bd-key-act: a stale lock is taken over and released" "grep -q after-crash $T/userdata/system/ka.log"
+rm -f $T/userdata/system/configs/multimedia_keys.conf
 kill -TERM $RUNPID $(pgrep -f '^bash .*/libexec/bd-session inner$') 2>/dev/null
 t "drm: session ends on SIGTERM" "waitfor '! alive $RUNPID'"
 t "drm: no leftover mounts" "! grep -q bdtest /proc/mounts"

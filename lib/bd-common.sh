@@ -64,8 +64,11 @@ bd_load_config() {
     : "${BD_AUDIO_SYNC:=1}"                 # inherit the host's audio device/profile/volume at start
     : "${BD_PULSE_COOKIE:=}"                # PulseAudio (not PipeWire) auth cookie; empty = the desktop user's own
     : "${BD_TRIGGERHAPPY:=auto}"            # auto (drm only) | 1 | 0   - key daemon inside Batocera
-    : "${BD_VOLUME_KEYS:=auto}"             # add volume/mute keys to triggerhappy: auto (only if hotkeygen is not started) | 1 | 0
-    : "${BD_VOLUME_STEP:=5}"
+    : "${BD_VOLUME_KEYS:=auto}"             # volume/mute keys handled by triggerhappy (acts on press, repeats): auto (when it runs) | 1 | 0
+    : "${BD_VOLUME_STEP:=5}"                # percent per key press
+    : "${BD_VOLUME_REPEAT_STEP:=3}"         # percent per repeat event while the key is held
+    : "${BD_BRIGHTNESS_KEYS:=auto}"         # KEY_BRIGHTNESSUP/DOWN in triggerhappy: auto (with the volume keys) | 1 | 0
+    : "${BD_BRIGHTNESS_STEP:=5}"
     : "${BD_VOLUME_GATE:=1}"                # drm: ignore Batocera's volume keys while its VT is not the active one
     : "${BD_BRIGHTNESS_GATE:=1}"            # drm: ignore Batocera's brightness changes while its VT is not the active one
     : "${BD_BACKLIGHT:=1}"                  # make /sys/class/backlight/* writable inside (batocera-brightness, ES slider)

@@ -1,0 +1,26 @@
+#!/bin/sh
+# bd-key-act
+# batocera-desktop: runs a key action unless the previous one of the same kind is still running.
+# Usage: bd-key-act NAME COMMAND [ARGS...]
+# triggerhappy gets ~30 repeat events per second while a key is held, and batocera-audio /
+# batocera-brightness take ~150 ms each: run them all and the processes pile up and keep
+# changing the value after the key is released. Instead the events that arrive while one
+# action is running are dropped, so a held key repeats at the speed the command allows.
+# The lock is a symlink whose target is the owner's PID (created atomically by ln -s); a
+# lock whose owner is gone (crash, kill) is taken over.
+NAME=$1
+shift
+[ -n "$NAME" ] && [ $# -gt 0 ] || exit 2
+LOCK=${BD_KEY_LOCK_DIR:-/run}/bd-key-$NAME.lock
+
+if ! ln -s "$$" "$LOCK" 2>/dev/null; then
+    OWNER=$(readlink "$LOCK" 2>/dev/null)
+    case "$OWNER" in ''|*[!0-9]*) ;; *)
+        kill -0 "$OWNER" 2>/dev/null && exit 0 ;;
+    esac
+    rm -f "$LOCK"
+    ln -s "$$" "$LOCK" 2>/dev/null || exit 0
+fi
+trap 'rm -f "$LOCK"' EXIT
+trap 'exit 143' TERM INT HUP
+"$@"

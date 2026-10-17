@@ -1,15 +1,18 @@
 # --- batocera-desktop begin (generated; everything below this line is replaced on each start) ---
-# Sourced by /etc/init.d/S50triggerhappy. Adds volume keys to Batocera's stock key map, which
-# has none on x86. Skipped when the user supplies their own multimedia_keys.conf.
-if [ "$CONFPATH" != /userdata/system/configs/multimedia_keys.conf ] && [ "$CONFFILE" != multimedia_keys_disabled.conf ]; then
-    BD_KEYS=/run/bd-multimedia_keys.conf
-    {
-        cat "$CONFPATH"
-        echo "KEY_VOLUMEUP   1 /usr/bin/batocera-audio setSystemVolume +@STEP@"
-        echo "KEY_VOLUMEUP   2 /usr/bin/batocera-audio setSystemVolume +@STEP@"
-        echo "KEY_VOLUMEDOWN 1 /usr/bin/batocera-audio setSystemVolume -@STEP@"
-        echo "KEY_VOLUMEDOWN 2 /usr/bin/batocera-audio setSystemVolume -@STEP@"
-        echo "KEY_MUTE       1 /usr/bin/batocera-audio setSystemVolume mute-toggle"
-    } > "$BD_KEYS"
-    DAEMON_ARGS="--daemon --triggers $BD_KEYS --socket /var/run/thd.socket --pidfile $PIDFILE /dev/input/event*"
-fi
+# Sourced by /etc/init.d/S50triggerhappy. Adds volume (and brightness) keys to the key map in use
+# (Batocera's stock one, or the user's multimedia_keys.conf): pressing acts at once and holding
+# repeats (bd-key-act drops repeats while the previous action still runs). A key the map already
+# binds is left alone, so the user's own lines win. hotkeygen's own volume binding is removed
+# from its mapping by bd-session, otherwise every press would count twice.
+BD_KEYS=/run/bd-multimedia_keys.conf
+bd_has_key() { grep -qE "^[[:space:]]*$1([[:space:]+]|\$)" "$CONFPATH" 2>/dev/null; }
+bd_bind() { # KEY ACTION_ON_PRESS [ACTION_ON_REPEAT]
+    bd_has_key "$1" && return 0
+    echo "$1 1 $2"
+    [ -n "$3" ] && echo "$1 2 $3"
+}
+{
+    cat "$CONFPATH"
+@LINES@
+} > "$BD_KEYS"
+DAEMON_ARGS="--daemon --triggers $BD_KEYS --socket /var/run/thd.socket --pidfile $PIDFILE /dev/input/event*"

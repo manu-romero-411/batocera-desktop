@@ -363,37 +363,77 @@ bd_mount_runtime() {
     return 0
 }
 
+# Should the volume keys be handled by triggerhappy (press + repeat) instead of hotkeygen (which
+# acts only when the key is released and never repeats)? auto = whenever triggerhappy runs.
+bd_volume_keys_on() {
+    case $BD_VOLUME_KEYS in
+        1) return 0 ;;
+        auto) bd_service_list | grep -q 'triggerhappy$' ;;
+        *) return 1 ;;
+    esac
+}
+
+# hotkeygen's image mapping binds KEY_VOLUMEUP/DOWN/MUTE; it fires on release and cannot repeat.
+# When triggerhappy takes over those keys, write the image's mapping without them to the writable
+# layer (the squashfs is never touched). Done on /etc/hotkeygen/default_mapping.conf itself so it
+# works whatever the way hotkeygen merges a user mapping with it; the pad shortcuts are not in it.
+bd_inject_hotkeygen_volume() {
+    local src dst tmp
+    [[ " $BD_SERVICES " == *hotkeygen* ]] || return 0
+    bd_volume_keys_on || return 0
+    src=$(bd_rpath "$BD_ROOT" /etc/hotkeygen)/default_mapping.conf
+    [[ -f $src ]] || return 0
+    dst=$(bd_rleaf "$BD_ROOT" /etc/hotkeygen/default_mapping.conf) || return 1
+    tmp=$(mktemp)
+    # drop the three entries, then a comma left dangling before the closing brace
+    if sed -E '/"KEY_(VOLUMEUP|VOLUMEDOWN|MUTE)"[[:space:]]*:/d' "$src" \
+        | sed -zE 's/,([[:space:]]*\})/\1/' >"$tmp" && [[ -s $tmp ]]; then
+        mkdir -p "${dst%/*}"
+        rm -f -- "$dst"
+        install -m 0644 -- "$tmp" "$dst"
+    else
+        log_warn "could not adapt $src: hotkeygen keeps its volume keys (they act on release)"
+    fi
+    rm -f "$tmp"
+}
+
 bd_inject_triggerhappy() {
-    # Batocera's stock key map has no volume keys. The S50triggerhappy service sources
-    # /etc/default/triggerhappy, so we extend the key map there (writable layer only; the
-    # squashfs is never touched). A user-provided /userdata/system/configs/multimedia_keys.conf
-    # always wins: add the volume keys to it yourself if you use one.
-    local f tmp step=$BD_VOLUME_STEP uk=$BD_USERDATA/system/configs/multimedia_keys.conf
-    # A multimedia_keys.conf of the user that also maps the volume keys (amixer, batocera-audio...)
-    # runs next to hotkeygen's own binding: every press changes the volume twice, and the VT gate
-    # only covers `batocera-audio setSystemVolume`, not other commands.
-    if [[ " $BD_SERVICES " == *hotkeygen* && -f $uk ]] \
-        && grep -qE '^[[:space:]]*KEY_(VOLUME(UP|DOWN)|MUTE)([[:space:]+]|$)' "$uk"; then
-        log_warn "$uk maps the volume keys and hotkeygen (started) already does: each press changes the volume twice. Remove those lines (hotkeygen handles them, and the pad shortcuts too)"
-    fi
-    # Batocera's hotkeygen already maps KEY_VOLUMEUP/DOWN/MUTE (default_mapping.conf ->
-    # batocera-audio setSystemVolume): with it running, a second handler would double the step.
-    if [[ $BD_VOLUME_KEYS == auto ]]; then
-        [[ " $BD_SERVICES " == *hotkeygen* ]] && return 0
-    elif [[ $BD_VOLUME_KEYS != 1 ]]; then
-        return 0
-    fi
+    # The S50triggerhappy service sources /etc/default/triggerhappy, so the key map is extended
+    # there (writable layer only; the squashfs is never touched). Keys that the map in use (the
+    # stock one or the user's multimedia_keys.conf) already binds are left as they are.
+    local f tmp step=$BD_VOLUME_STEP rstep=$BD_VOLUME_REPEAT_STEP bstep=$BD_BRIGHTNESS_STEP lines=""
+    local act='/usr/bin/bd-key-act'
     [[ $step =~ ^[0-9]+$ ]] || step=5
+    [[ $rstep =~ ^[0-9]+$ ]] || rstep=3
+    [[ $bstep =~ ^[0-9]+$ ]] || bstep=5
+    if bd_volume_keys_on; then
+        lines+="    bd_bind KEY_VOLUMEUP \"$act volume /usr/bin/batocera-audio setSystemVolume +$step\" \"$act volume /usr/bin/batocera-audio setSystemVolume +$rstep\"
+    bd_bind KEY_VOLUMEDOWN \"$act volume /usr/bin/batocera-audio setSystemVolume -$step\" \"$act volume /usr/bin/batocera-audio setSystemVolume -$rstep\"
+    bd_bind KEY_MUTE \"/usr/bin/batocera-audio setSystemVolume mute-toggle\"
+"
+    fi
+    if [[ $BD_BRIGHTNESS_KEYS == 1 || ( $BD_BRIGHTNESS_KEYS == auto && -n $lines ) ]]; then
+        lines+="    bd_bind KEY_BRIGHTNESSUP \"$act brightness /usr/bin/batocera-brightness + $bstep\" \"$act brightness /usr/bin/batocera-brightness + $bstep\"
+    bd_bind KEY_BRIGHTNESSDOWN \"$act brightness /usr/bin/batocera-brightness - $bstep\" \"$act brightness /usr/bin/batocera-brightness - $bstep\"
+"
+    fi
     f=$(bd_rleaf "$BD_ROOT" /etc/default/triggerhappy) || return 1
     mkdir -p "${f%/*}"
     tmp=$(mktemp)
     {
         [[ -f $f ]] && sed '/^# --- batocera-desktop begin/,$d' "$f"
-        sed "s/@STEP@/$step/g" "$BD_PREFIX/share/chroot/etc/default/triggerhappy"
+        if [[ -n $lines ]]; then
+            # lines holds quotes and no '|' or '&': substitute it with bash, not sed
+            local tpl
+            tpl=$(<"$BD_PREFIX/share/chroot/etc/default/triggerhappy")
+            printf '%s\n' "${tpl//@LINES@/${lines%$'\n'}}"
+        fi
     } >"$tmp"
     rm -f -- "$f"
     install -m 0644 -- "$tmp" "$f"
     rm -f "$tmp"
+    bd_put "$BD_PREFIX/share/chroot/usr/bin/bd-key-act" /usr/bin/bd-key-act 0755 || return 1
+    bd_inject_hotkeygen_volume
 }
 
 bd_inject_files() {
@@ -919,7 +959,7 @@ cmd_doctor() {
         if ck=$(bd_pulse_cookie "${BD_UID:-}"); then log_info "PulseAudio cookie handed to Batocera: $ck (needed only with PulseAudio, not PipeWire)"
         else log_info "no PulseAudio cookie found (fine with PipeWire; with PulseAudio Batocera will get 'Access denied': set BD_PULSE_COOKIE)"; fi
     fi
-    log_info "triggerhappy: $BD_TRIGGERHAPPY (auto = drm only), volume keys: $BD_VOLUME_KEYS (step $BD_VOLUME_STEP)"
+    log_info "triggerhappy: $BD_TRIGGERHAPPY (auto = drm only), volume keys: $BD_VOLUME_KEYS (step $BD_VOLUME_STEP, repeat $BD_VOLUME_REPEAT_STEP), brightness keys: $BD_BRIGHTNESS_KEYS (step $BD_BRIGHTNESS_STEP)"
     echo "== Gamepads"
     chk "/dev/uinput" "[[ -e /dev/uinput ]]"
     chk "uhid module (Bluetooth pads)" "grep -q '^uhid ' /proc/modules || [[ -e /dev/uhid ]]"
