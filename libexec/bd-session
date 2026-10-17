@@ -323,11 +323,14 @@ bd_mount_runtime() {
     [[ -e $(bd_rpath "$R" /var/run) ]] || bd_ln /var/run /run
     [[ -d /run/udev ]] && bd_bind /run/udev /run/udev ro # libudev/SDL: gamepad classification from the host
     if [[ -n ${BD_XDG:-} && -d $BD_XDG ]]; then bd_bind "$BD_XDG" /run/host-xdg; fi
-    # PulseAudio (not PipeWire) refuses root without the user's cookie: hand it over, read-only
+    # PulseAudio (not PipeWire) refuses root without the user's cookie: hand it over. It is a COPY
+    # (private tmpfs, mode 0600), not a bind mount: libpulse opens the cookie read-write to lock it,
+    # so a read-only bind fails with "Read-only file system" and the server answers "Access denied".
+    # A copy also keeps the user's real cookie out of reach of anything running as root in here.
     BD_COOKIE_BOUND=0
     if [[ $BD_AUDIO == host && -n ${BD_XDG:-} ]] && ck=$(bd_pulse_cookie "${BD_UID:-}"); then
-        if bd_bind "$ck" /run/host-pulse-cookie ro; then BD_COOKIE_BOUND=1
-        else log_warn "could not bind the PulseAudio cookie $ck"; fi
+        if install -m 0600 -- "$ck" "$(bd_rpath "$R" /run/host-pulse-cookie)"; then BD_COOKIE_BOUND=1
+        else log_warn "could not copy the PulseAudio cookie $ck"; fi
     fi
     case $BD_BT in
     host)
@@ -401,7 +404,9 @@ bd_inject_files() {
         bd_x11_gpu_conf "$(bd_rleaf "$BD_ROOT" /etc/X11/xorg.conf.d/10-bd-gpu.conf)" "$md" ||
             log_warn "could not write the Xorg GPU configuration"
     fi
-    ((P_LEGACY)) && bd_inject_alsa_pulse
+    # Batocera's audio path (SDL -> ALSA "default" -> pcm_pipewire, or SDL's PipeWire backend) needs
+    # a PipeWire socket. A plain-PulseAudio host has none: send ALSA's default to the Pulse socket.
+    if ((P_LEGACY)) || [[ ! -S ${BD_XDG:-/nonexistent}/pipewire-0 ]]; then bd_inject_alsa_pulse; fi
     bd_put "$BD_PREFIX/share/chroot/usr/bin/bd-audio-inherit" /usr/bin/bd-audio-inherit 0755 || return 1
     bd_inject_triggerhappy
     # shutdown shims: ES calls shutdown/poweroff/reboot -> back to the desktop / restart the session
@@ -551,7 +556,7 @@ bd_diag_procs() { # why did the session end? list what is (not) running in the c
         for p in "$BD_ROOT"/proc/[0-9]*; do
             r=$(readlink "$p/root" 2>/dev/null) || continue
             [[ $r == "$BD_ROOT" ]] || continue
-            read -r c <"$p/comm" 2>/dev/null || continue
+            read -r c 2>/dev/null <"$p/comm" || continue
             a=$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null)
             echo "  ${p##*/} comm=$c cmd=${a:0:200}"
         done

@@ -455,7 +455,7 @@ bd_chroot_proc() {   # is there a process with that comm inside the chroot?
     [[ $name == Xorg ]] && alts=" Xorg Xorg.real Xorg.wrap Xorg.wrap.real X "
     for p in "$BD_ROOT"/proc/[0-9]*; do
         [[ -r $p/comm ]] || continue
-        read -r c <"$p/comm" 2>/dev/null || continue
+        read -r c 2>/dev/null <"$p/comm" || continue
         [[ $alts == *" $c "* ]] || continue
         r=$(readlink "$p/root" 2>/dev/null) || continue
         [[ $r == "$BD_ROOT" ]] && return 0
