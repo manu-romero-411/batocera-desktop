@@ -67,6 +67,8 @@ bd_load_config() {
     : "${BD_VOLUME_KEYS:=auto}"             # add volume/mute keys to triggerhappy: auto (only if hotkeygen is not started) | 1 | 0
     : "${BD_VOLUME_STEP:=5}"
     : "${BD_VOLUME_GATE:=1}"                # drm: ignore Batocera's volume keys while its VT is not the active one
+    : "${BD_BRIGHTNESS_GATE:=1}"            # drm: ignore Batocera's brightness changes while its VT is not the active one
+    : "${BD_BACKLIGHT:=1}"                  # make /sys/class/backlight/* writable inside (batocera-brightness, ES slider)
     : "${BD_XKB_LAYOUT:=}"
     : "${BD_XKB_VARIANT:=}"
     : "${BD_NVIDIA_HOST_EGL_PLATFORM:=0}"   # 1 = also use the host's libnvidia-egl-*
@@ -218,6 +220,30 @@ bd_inject_vt_file() {
 bd_inject_volume_gate() {
     [[ ${BD_MODE:-nested} == drm && $BD_VOLUME_GATE == 1 && -n ${BD_TTY:-} ]] || return 0
     bd_shim_install /usr/bin/batocera-audio usr/bin/batocera-audio bd-shim-audio optional
+}
+
+# /sys is read-only inside (so Batocera's sysctl/sysrq stay away from the host), which also stops
+# batocera-brightness (ES brightness slider, "cycle" hotkey) from writing
+# /sys/class/backlight/*/brightness. Bind just the backlight devices read-write over it; call it
+# after the read-only /sys is in place. Devices that appear later (hotplug) need a new session.
+bd_bind_backlight() {
+    [[ ${BD_BACKLIGHT:-1} == 1 ]] || return 0
+    local sys=${BD_SYS:-/sys} d real
+    for d in "$sys"/class/backlight/*; do
+        [[ -e $d ]] || continue
+        real=$(readlink -f -- "$d") || continue
+        [[ $real == "$sys"/devices/* ]] || continue
+        bd_bind "$real" "$real" || log_warn "could not make the backlight $real writable"
+    done
+    return 0
+}
+
+# Same for brightness: with /sys/class/backlight writable (bd_bind_backlight), a key mapped to
+# `batocera-brightness` in Batocera's key daemons would change the HOST's backlight while the
+# desktop is in front. The shim drops any change (calls with arguments) while our VT is not active.
+bd_inject_brightness_gate() {
+    [[ ${BD_MODE:-nested} == drm && $BD_BRIGHTNESS_GATE == 1 && -n ${BD_TTY:-} ]] || return 0
+    bd_shim_install /usr/bin/batocera-brightness usr/bin/batocera-brightness bd-shim-brightness optional
 }
 
 # X11 variants: Xorg must run on OUR vt. Wrap the server (see share/chroot/usr/bin/Xorg-shim).

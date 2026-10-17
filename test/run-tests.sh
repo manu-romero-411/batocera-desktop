@@ -81,7 +81,12 @@ cat > $R/usr/bin/batocera-settings-set <<'X'
 #!/bin/sh
 echo "$1=$2" >> /userdata/system/batocera.conf
 X
-chmod +x $R/usr/bin/batocera-resolution $R/usr/bin/pactl $R/usr/bin/batocera-audio $R/usr/bin/batocera-settings-set
+cat > $R/usr/bin/batocera-brightness <<'X'
+#!/bin/sh
+[ $# -eq 0 ] && { echo 50; exit 0; }
+echo "$*" >> /userdata/system/bri.log
+X
+chmod +x $R/usr/bin/batocera-resolution $R/usr/bin/pactl $R/usr/bin/batocera-audio $R/usr/bin/batocera-settings-set $R/usr/bin/batocera-brightness
 mkdir -p $R/etc/default
 echo "# image default" > $R/etc/default/triggerhappy
 mkdir -p $R/usr/share/rufo; echo rufo > $R/usr/share/rufo/marker
@@ -159,6 +164,9 @@ t "nested: batocera-resolution shim installed, original kept as .real" "inns chr
 t "volume keys added to /etc/default/triggerhappy (image content kept)" "inns chroot /run/bdtest/root /bin/cat /etc/default/triggerhappy | grep -q 'setSystemVolume +5' && inns chroot /run/bdtest/root /bin/cat /etc/default/triggerhappy | grep -q 'image default'"
 t "audio inherited from host into batocera.conf (volume, device, profile)" "grep -q '^audio.volume=42' $T/userdata/system/batocera.conf && grep -q '^audio.device=fake_sink' $T/userdata/system/batocera.conf && grep -q '^audio.profile=output:stereo@fake_card' $T/userdata/system/batocera.conf"
 t "nested: batocera-audio is not wrapped (no VT gate)" "! inns chroot /run/bdtest/root /bin/sh -c 'grep -q bd-shim-audio /usr/bin/batocera-audio'"
+t "no warning about volume keys when the user has no key map" "! grep -q 'maps the volume keys' $T/logs/run.log"
+t "nested: batocera-brightness is not wrapped (no VT gate)" "! inns chroot /run/bdtest/root /bin/sh -c 'grep -q bd-shim-brightness /usr/bin/batocera-brightness'"
+t "resolv.conf inside is a link to the session's copy of the host's" "[ \"\$(inns chroot /run/bdtest/root /bin/readlink /etc/resolv.conf)\" = /run/host-resolv.conf ] && [ \"\$(inns chroot /run/bdtest/root /bin/cat /etc/resolv.conf)\" = \"\$(cat /etc/resolv.conf)\" ]"
 t "env: BD_MODE=nested, BD_FULLSCREEN=0" "grep -q '^BD_MODE=nested' $T/userdata/system/labwc.env && grep -q '^BD_FULLSCREEN=0' $T/userdata/system/labwc.env"
 
 section "Test 2: shutdown inside ES -> back to desktop, clean"
@@ -197,8 +205,13 @@ t "enter -- cat version" "'$PFX/libexec/bd-session' enter -- /bin/cat /usr/share
 
 section "Test 6: drm mode (stock launcher, key daemon on, no nested shims)"
 rm -f $T/userdata/system/stock-launch-ran $T/userdata/system/thd.log
+# a user multimedia_keys.conf that maps the volume keys next to hotkeygen: every press would count twice
+mkdir -p $T/userdata/system/configs
+printf 'KEY_VOLUMEUP\t\t1amixer set Master 5%%+\n#KEY_MUTE 1 x\nKEY_F2+KEY_LEFTMETA\t1batocera-brightness cycle\n' > $T/userdata/system/configs/multimedia_keys.conf
 BD_MODE=drm BD_TTY=/dev/tty63 start_session
 t "drm: Batocera's own labwc-launch is used" "waitfor '[ -e $T/userdata/system/stock-launch-ran ]'"
+t "drm: warns when the user's multimedia_keys.conf maps the volume keys next to hotkeygen" "grep -q 'maps the volume keys' $T/logs/run.log"
+rm -f $T/userdata/system/configs/multimedia_keys.conf
 t "drm: triggerhappy started (volume keys work on a bare console)" "grep -q start $T/userdata/system/thd.log"
 t "drm: batocera-resolution not replaced" "! inns chroot /run/bdtest/root /bin/sh -c 'grep -q bd-shim-resolution /usr/bin/batocera-resolution'"
 # volume gate: key actions only count while Batocera's VT (63 here) is the active one
@@ -210,6 +223,14 @@ t "drm: volume key ignored while the desktop VT is active" "[ ! -e $T/userdata/s
 vol tty63
 t "drm: volume key applied while Batocera's VT is active" "grep -q 'setSystemVolume +5' $T/userdata/system/vol.log"
 t "drm: other batocera-audio calls pass through the gate" "[ \"\$(inns chroot /run/bdtest/root /usr/bin/batocera-audio getSystemVolume)\" = 42 ]"
+# brightness gate: same rule
+bri() { inns chroot /run/bdtest/root /bin/sh -c "echo $1 > /tmp/active; BD_ACTIVE_VT_FILE=/tmp/active /usr/bin/batocera-brightness cycle"; }
+rm -f $T/userdata/system/bri.log
+bri tty1
+t "drm: brightness change ignored while the desktop VT is active" "[ ! -e $T/userdata/system/bri.log ]"
+bri tty63
+t "drm: brightness change applied while Batocera's VT is active" "grep -q 'cycle' $T/userdata/system/bri.log"
+t "drm: reading the brightness (no arguments) passes through the gate" "[ \"\$(inns chroot /run/bdtest/root /usr/bin/batocera-brightness)\" = 50 ]"
 kill -TERM $RUNPID $(pgrep -f '^bash .*/libexec/bd-session inner$') 2>/dev/null
 t "drm: session ends on SIGTERM" "waitfor '! alive $RUNPID'"
 t "drm: no leftover mounts" "! grep -q bdtest /proc/mounts"
@@ -344,6 +365,35 @@ t "legacy ~/.pulse-cookie is the fallback" "[ \"\$(HOME_FAKE=$T/home2 pc '' 1234
 t "no cookie (PipeWire setups) -> none, not an error for the session" "! HOME_FAKE=$T/nohome pc '' 1234"
 t "BD_PULSE_COOKIE overrides the lookup" "[ \"\$(HOME_FAKE=$T/home pc $T/pulse-cookie 1234)\" = $T/pulse-cookie ]"
 t "BD_PULSE_COOKIE pointing nowhere -> none" "! HOME_FAKE=$T/home pc $T/nope 1234"
+
+section "Test 13: resolv.conf inside follows the host's"
+RS=$T/rs; mkdir -p $RS/root/run $RS/root/etc
+rs(){ ( . "$PFX/lib/bd-common.sh"; BD_ROOT=$RS/root; BD_HOST_RESOLV=$RS/host; bd_sync_resolv ); }
+printf '# Generated by NetworkManager\n' > $RS/host
+t "resolv: a header-only file (NetworkManager not done yet) is copied as it is" "rs && [ \"\$(cat $RS/root/run/host-resolv.conf)\" = '# Generated by NetworkManager' ]"
+printf '# Generated by NetworkManager\nnameserver 192.168.1.1\n' > $RS/host
+t "resolv: a later change of the host's file reaches the chroot" "rs && grep -q 'nameserver 192.168.1.1' $RS/root/run/host-resolv.conf"
+t "resolv: nothing is left behind (written aside and renamed)" "[ ! -e $RS/root/run/host-resolv.conf.new ]"
+rm -f $RS/host
+t "resolv: a host without resolv.conf keeps the last good one" "rs && grep -q 'nameserver 192.168.1.1' $RS/root/run/host-resolv.conf"
+
+section "Test 14: backlight devices writable inside the read-only /sys"
+cat > $T/bl-test.sh <<'X'
+set -e
+B=$1 P=$2 ON=$3
+S=$B/fakesys
+mkdir -p $S/devices/p/bl $S/class/backlight $B/root$S
+echo 3000 > $S/devices/p/bl/brightness
+ln -sfn ../../devices/p/bl $S/class/backlight/bl
+mount --bind $S $B/root$S; mount -o remount,bind,ro $B/root$S
+. "$P/lib/bd-common.sh"
+BD_ROOT=$B/root; BD_SYS=$S; BD_BACKLIGHT=$ON
+bd_bind_backlight
+echo 7 > $B/root$S/class/backlight/bl/brightness
+if touch $B/root$S/devices/p/other 2>/dev/null; then exit 1; fi
+X
+t "backlight: with BD_BACKLIGHT=1 the device is writable and the rest of /sys is not" "rm -rf $T/bl; mkdir -p $T/bl; unshare -m bash $T/bl-test.sh $T/bl $PFX 1"
+t "backlight: with BD_BACKLIGHT=0 it stays read-only" "rm -rf $T/bl; mkdir -p $T/bl; ! unshare -m bash $T/bl-test.sh $T/bl $PFX 0 2>/dev/null"
 
 echo
 summary "Result"

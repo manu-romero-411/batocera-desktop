@@ -1,0 +1,27 @@
+#!/bin/sh
+# bd-shim-brightness
+# batocera-desktop (drm mode): wraps batocera-brightness so that changes are ignored while
+# Batocera's VT is not the one on screen. Batocera's key daemons (hotkeygen, triggerhappy) read
+# /dev/input whatever VT is in front, and /sys/class/backlight is the HOST's: a key mapped to
+# "cycle" (the stock triggerhappy map has a bare KEY_LEFTMETA, the Super key) would change the
+# backlight from the desktop. Reading the value (no arguments) and any call made while Batocera
+# is in front go straight to the original. From a shell opened while the desktop is in front,
+# call batocera-brightness.real to bypass the gate.
+REAL=${BD_BRIGHTNESS_REAL:-/usr/bin/batocera-brightness.real}
+VTFILE=${BD_VTFILE:-/run/bd-vt}
+ACTIVE=${BD_ACTIVE_VT_FILE:-/sys/class/tty/tty0/active}
+LOG=/userdata/system/logs/display.log
+
+if [ $# -gt 0 ]; then
+    VT=$(cat "$VTFILE" 2>/dev/null)
+    CUR=$(cat "$ACTIVE" 2>/dev/null)
+    case "$VT" in ''|*[!0-9]*) ;; *)
+        case "$CUR" in tty[0-9]*)
+            if [ "$CUR" != "tty$VT" ]; then
+                printf '[INFO] bd-brightness: "%s" ignored (Batocera is on tty%s, the active VT is %s)\n' "$*" "$VT" "$CUR" >>"$LOG" 2>/dev/null
+                exit 0
+            fi ;;
+        esac ;;
+    esac
+fi
+exec "$REAL" "$@"
