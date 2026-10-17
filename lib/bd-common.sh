@@ -447,6 +447,23 @@ bd_x11_gpu_conf() {
 }
 
 # --------------------------------------------------------------- utilities
+# bd_sync_resolv : keep the chroot's DNS configuration identical to the host's while the session
+# lives. /etc/resolv.conf inside is a symlink to /run/host-resolv.conf (the session's private tmpfs,
+# see bd_prepare); this refreshes that file whenever the host's changes (a different wifi, VPN, or
+# NetworkManager finishing after the service started). The new file is written aside and renamed, so
+# readers never see a half-written one, and glibc/libcurl notice the change by mtime/inode.
+# Cheap enough for a 1 s loop: one cmp when nothing changed.
+bd_sync_resolv() {
+    local src=${BD_HOST_RESOLV:-/etc/resolv.conf} dst=${BD_RESOLV_DST:-}
+    if [[ -z $dst ]]; then
+        dst=$(bd_rpath "$BD_ROOT" /run/host-resolv.conf) || return 1
+        BD_RESOLV_DST=$dst
+    fi
+    [[ -r $src ]] || return 0 # host has none right now: keep the last one
+    cmp -s -- "$src" "$dst" 2>/dev/null && return 0
+    cat -- "$src" >"$dst.new" 2>/dev/null && mv -f -- "$dst.new" "$dst"
+}
+
 bd_chroot_proc() {   # is there a process with that comm inside the chroot?
     local p c r alts name=${1:0:15}
     # X11: our shim execs Xorg.real, so the kernel's comm is never "Xorg" (and Debian also has

@@ -352,11 +352,13 @@ bd_mount_runtime() {
         bd_bind "$src" "$dst" "$opt" rec
     done
 
-    # resolv.conf (may be a symlink in the rootfs; replace the leaf, never write through it)
-    dst=$(bd_rleaf "$R" /etc/resolv.conf)
-    mkdir -p "${dst%/*}"
-    rm -f -- "$dst"
-    cat /etc/resolv.conf >"$dst" 2>/dev/null
+    # DNS: /etc/resolv.conf is a symlink to a file in the session's private /run, kept in step with
+    # the host's by bd_sync_resolv (now, and every second from the session loop). A one-shot copy
+    # broke whenever the service started before NetworkManager had written the DNS servers (a file
+    # with only its header and no nameserver: glibc then falls back to 127.0.0.1) and it never
+    # followed a change of network.
+    bd_ln /etc/resolv.conf /run/host-resolv.conf
+    bd_sync_resolv
     return 0
 }
 
@@ -599,6 +601,7 @@ bd_wait_session() {
                 break
             fi
         fi
+        bd_sync_resolv
         sleep 1 &
         wait $!
     done
